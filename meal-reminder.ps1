@@ -134,6 +134,7 @@ $script:TrayIconBlinkTimer = $null
 $script:TrayIconBlinkCount = 0
 $script:TrayIconBlinkMaxCount = 6
 $script:TrayIconOriginalIcon = $null
+$script:TrayIconBlankIcon = $null
 
 $script:Colors = [ordered]@{
     Background = [System.Drawing.Color]::FromArgb(248, 250, 252)
@@ -3521,6 +3522,9 @@ function Start-TrayIconBlink {
     # 保存原始图标
     $script:TrayIconOriginalIcon = $script:TrayIcon.Icon
 
+    # 预创建空白图标（避免每次闪烁都创建新对象）
+    $script:TrayIconBlankIcon = New-Object System.Drawing.Icon([System.Drawing.SystemIcons]::Application, 16, 16)
+
     $script:TrayIconBlinkCount = 0
     $script:TrayIconBlinkTimer = New-Object System.Windows.Forms.Timer
     $script:TrayIconBlinkTimer.Interval = 500
@@ -3531,9 +3535,10 @@ function Start-TrayIconBlink {
 
         # 交替显示图标和透明图标
         if ($script:TrayIconBlinkCount % 2 -eq 1) {
-            # 显示透明图标（使用空白图标）
-            $blankIcon = New-Object System.Drawing.Icon([System.Drawing.SystemIcons]::Application, 16, 16)
-            $script:TrayIcon.Icon = $blankIcon
+            # 显示空白图标
+            if ($null -ne $script:TrayIconBlankIcon) {
+                $script:TrayIcon.Icon = $script:TrayIconBlankIcon
+            }
         }
         else {
             # 显示原始图标
@@ -3560,9 +3565,15 @@ function Stop-TrayIconBlink {
     # 恢复原始图标
     if ($null -ne $script:TrayIcon -and $null -ne $script:TrayIconOriginalIcon) {
         $script:TrayIcon.Icon = $script:TrayIconOriginalIcon
-        $script:TrayIconOriginalIcon = $null
     }
 
+    # 释放空白图标资源
+    if ($null -ne $script:TrayIconBlankIcon) {
+        $script:TrayIconBlankIcon.Dispose()
+        $script:TrayIconBlankIcon = $null
+    }
+
+    $script:TrayIconOriginalIcon = $null
     $script:TrayIconBlinkCount = 0
 }
 
