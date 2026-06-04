@@ -1,8 +1,14 @@
-# 运行时日志
+# Runtime logs
 *.log
 
-# 窗口显示请求文件（IPC）
+# Stats backup files
+meal-reminder.stats.log.bak-*
+
+# Single-instance show request files
 meal-reminder.show
 
-# 主题图片缓存（自动生成）
+# Generated theme image cache
 assets/themes/cache/
+
+# Portable package output
+dist/

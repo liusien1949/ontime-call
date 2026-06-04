@@ -101,9 +101,17 @@ Set-StrictMode -Version Latest
 
 $script:AppName = '饭点提醒'
 $script:BaseDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$script:ConfigPath = Join-Path $script:BaseDir 'meal-reminder.config.json'
-$script:LogPath = Join-Path $script:BaseDir 'meal-reminder.log'
-$script:ShowRequestPath = Join-Path $script:BaseDir 'meal-reminder.show'
+$script:AppDataRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'ontime-call'
+$script:ConfigDir = Join-Path $script:AppDataRoot 'config'
+$script:LogDir = Join-Path $script:AppDataRoot 'logs'
+$script:StateDir = Join-Path $script:AppDataRoot 'state'
+$script:ConfigPath = Join-Path $script:ConfigDir 'meal-reminder.config.json'
+$script:LogPath = Join-Path $script:LogDir 'meal-reminder.log'
+$script:StatsPath = Join-Path $script:BaseDir 'meal-reminder.stats.log'
+$script:ShowRequestPath = Join-Path $script:StateDir 'meal-reminder.show'
+$script:LegacyConfigPath = Join-Path $script:BaseDir 'meal-reminder.config.json'
+$script:LegacyLogPath = Join-Path $script:BaseDir 'meal-reminder.log'
+$script:LegacyShowRequestPath = Join-Path $script:BaseDir 'meal-reminder.show'
 $script:Config = $null
 $script:MainForm = $null
 $script:TrayIcon = $null
@@ -159,6 +167,7 @@ function Get-ThemeMode {
         'Dark' { return 'Dark' }
         'Kuromi' { return 'Kuromi' }
         'Pikachu' { return 'Pikachu' }
+        'LineDog' { return 'LineDog' }
         'PigHero' { return 'PigHero' }
         default { return 'Light' }
     }
@@ -171,6 +180,7 @@ function Get-ThemeDisplayName {
         'Dark' { return '深色模式' }
         'Kuromi' { return '库洛米主题' }
         'Pikachu' { return '皮卡丘主题' }
+        'LineDog' { return '线条小狗主题' }
         'PigHero' { return '猪猪侠主题' }
         default { return '浅色模式' }
     }
@@ -180,8 +190,9 @@ function Get-ThemeElementText {
     param([object]$Value)
 
     switch (Get-ThemeMode -Value $Value) {
-        'Kuromi' { return '库洛米 | 黑紫蝴蝶结' }
+        'Kuromi' { return '库洛米' }
         'Pikachu' { return '皮卡丘 | 闪电能量' }
+        'LineDog' { return '线条小狗 | 双狗饭点' }
         'PigHero' { return '猪猪侠 | 红甲勇气' }
         'Dark' { return '深色 | 夜间低亮' }
         default { return '浅色 | 清爽工作台' }
@@ -197,6 +208,7 @@ function Get-ThemeWindowTitle {
     $baseTitle = switch (Get-ThemeMode -Value $Theme) {
         'Kuromi' { '库洛米饭点提醒' }
         'Pikachu' { '皮卡丘饭点提醒' }
+        'LineDog' { '线条小狗饭点提醒' }
         'PigHero' { '猪猪侠饭点提醒' }
         default { $script:AppName }
     }
@@ -215,7 +227,8 @@ function Get-ThemeIndex {
         'Dark' { return 1 }
         'Kuromi' { return 2 }
         'Pikachu' { return 3 }
-        'PigHero' { return 4 }
+        'LineDog' { return 4 }
+        'PigHero' { return 5 }
         default { return 0 }
     }
 }
@@ -227,8 +240,95 @@ function Get-ThemeFromIndex {
         1 { return 'Dark' }
         2 { return 'Kuromi' }
         3 { return 'Pikachu' }
-        4 { return 'PigHero' }
+        4 { return 'LineDog' }
+        5 { return 'PigHero' }
         default { return 'Light' }
+    }
+}
+
+function Get-BuiltInIconDefinitions {
+    return @(
+        [pscustomobject]@{ Key = 'meal-clock'; Display = '饭点闹钟'; File = 'meal-clock.ico' },
+        [pscustomobject]@{ Key = 'kuromi-clock'; Display = '库洛米闹钟'; File = 'kuromi-clock.ico' },
+        [pscustomobject]@{ Key = 'pikachu-clock'; Display = '皮卡丘闹钟'; File = 'pikachu-clock.ico' },
+        [pscustomobject]@{ Key = 'tdog-clock'; Display = '线条小狗闹钟'; File = 'tdog-clock.ico' },
+        [pscustomobject]@{ Key = 'work-badge'; Display = '工牌打卡'; File = 'work-badge.ico' },
+        [pscustomobject]@{ Key = 'night-bowl'; Display = '月亮饭碗'; File = 'night-bowl.ico' }
+    )
+}
+
+function Get-BuiltInIconDefinition {
+    param([string]$Key)
+
+    foreach ($item in (Get-BuiltInIconDefinitions)) {
+        if ($item.Key -eq $Key) {
+            return $item
+        }
+    }
+
+    return $null
+}
+
+function Get-BuiltInIconPath {
+    param([string]$Key)
+
+    $item = Get-BuiltInIconDefinition -Key $Key
+    if ($null -eq $item) {
+        return $null
+    }
+
+    $path = Join-Path $script:BaseDir ('assets\icons\{0}' -f $item.File)
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        return $path
+    }
+
+    return $null
+}
+
+function Get-AppIconPreference {
+    if ($null -eq $script:Config -or $null -eq $script:Config.Preferences -or -not ($script:Config.Preferences.PSObject.Properties.Name -contains 'Icon') -or $null -eq $script:Config.Preferences.Icon) {
+        return [pscustomobject]@{
+            Mode = 'FollowTheme'
+            BuiltIn = ''
+            CustomPath = ''
+        }
+    }
+
+    $icon = $script:Config.Preferences.Icon
+    $mode = if ($icon.PSObject.Properties.Name -contains 'Mode') { [string]$icon.Mode } else { 'FollowTheme' }
+    if ($mode -notin @('FollowTheme', 'BuiltIn', 'Custom')) {
+        $mode = 'FollowTheme'
+    }
+
+    return [pscustomobject]@{
+        Mode = $mode
+        BuiltIn = if ($icon.PSObject.Properties.Name -contains 'BuiltIn') { [string]$icon.BuiltIn } else { '' }
+        CustomPath = if ($icon.PSObject.Properties.Name -contains 'CustomPath') { [string]$icon.CustomPath } else { '' }
+    }
+}
+
+function Set-AppIconPreference {
+    param(
+        [string]$Mode,
+        [string]$BuiltIn = '',
+        [string]$CustomPath = ''
+    )
+
+    if ($Mode -notin @('FollowTheme', 'BuiltIn', 'Custom')) {
+        $Mode = 'FollowTheme'
+    }
+
+    if (-not ($script:Config.Preferences.PSObject.Properties.Name -contains 'Icon') -or $null -eq $script:Config.Preferences.Icon) {
+        $script:Config.Preferences | Add-Member -MemberType NoteProperty -Name Icon -Value ([pscustomobject]@{
+            Mode = $Mode
+            BuiltIn = $BuiltIn
+            CustomPath = $CustomPath
+        }) -Force
+    }
+    else {
+        $script:Config.Preferences.Icon | Add-Member -MemberType NoteProperty -Name Mode -Value $Mode -Force
+        $script:Config.Preferences.Icon | Add-Member -MemberType NoteProperty -Name BuiltIn -Value $BuiltIn -Force
+        $script:Config.Preferences.Icon | Add-Member -MemberType NoteProperty -Name CustomPath -Value $CustomPath -Force
     }
 }
 
@@ -242,6 +342,7 @@ function Get-ThemeAssetPath {
     $prefix = switch ($themeMode) {
         'Kuromi' { 'kuromi' }
         'Pikachu' { 'pikachu' }
+        'LineDog' { 'tdog' }
         'PigHero' { 'pighero' }
         default { $null }
     }
@@ -272,6 +373,7 @@ function Get-ThemeCachePath {
     $prefix = switch ($themeMode) {
         'Kuromi' { 'kuromi' }
         'Pikachu' { 'pikachu' }
+        'LineDog' { 'tdog' }
         'PigHero' { 'pighero' }
         default { $null }
     }
@@ -280,7 +382,7 @@ function Get-ThemeCachePath {
         return $null
     }
 
-    $cacheDir = Join-Path $script:BaseDir 'assets\themes\cache'
+    $cacheDir = Join-Path $script:AppDataRoot 'cache\themes'
     return (Join-Path $cacheDir ('{0}-{1}.cache.png' -f $prefix, $Kind))
 }
 
@@ -513,6 +615,12 @@ function Set-ThemedPicture {
     }
 
     $PictureBox.Image = $image
+    if ($Kind -eq 'banner') {
+        $PictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::StretchImage
+    }
+    else {
+        $PictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+    }
     $PictureBox.Visible = $true
 }
 
@@ -522,8 +630,120 @@ function Get-ThemeImageBackColor {
     switch (Get-ThemeMode -Value $Theme) {
         'Kuromi' { return [System.Drawing.Color]::FromArgb(252, 246, 255) }
         'Pikachu' { return [System.Drawing.Color]::FromArgb(255, 252, 224) }
+        'LineDog' { return [System.Drawing.Color]::FromArgb(255, 251, 239) }
         default { return $script:Colors.Background }
     }
+}
+
+function New-IconFromImage {
+    param(
+        [System.Drawing.Image]$Image,
+        [string]$CacheKey
+    )
+
+    if ($null -eq $Image) {
+        return [System.Drawing.SystemIcons]::Information
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CacheKey) -and $script:ThemeIcons.ContainsKey($CacheKey)) {
+        return $script:ThemeIcons[$CacheKey]
+    }
+
+    $bmp = New-Object System.Drawing.Bitmap(32, 32, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $graphics.Clear([System.Drawing.Color]::Transparent)
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.DrawImage($Image, 0, 0, 32, 32)
+    }
+    finally {
+        $graphics.Dispose()
+    }
+
+    try {
+        $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon()).Clone()
+        if (-not [string]::IsNullOrWhiteSpace($CacheKey)) {
+            $script:ThemeIcons[$CacheKey] = $icon
+        }
+        return $icon
+    }
+    catch {
+        Write-AppLog -Event 'AppIconCreateFailed' -Message $_.Exception.Message -Level 'WARN'
+        return [System.Drawing.SystemIcons]::Information
+    }
+    finally {
+        $bmp.Dispose()
+    }
+}
+
+function Get-IconFromFile {
+    param(
+        [string]$Path,
+        [string]$CacheKey
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [System.Drawing.SystemIcons]::Information
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CacheKey) -and $script:ThemeIcons.ContainsKey($CacheKey)) {
+        return $script:ThemeIcons[$CacheKey]
+    }
+
+    $ext = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    try {
+        if ($ext -eq '.ico') {
+            $icon = (New-Object System.Drawing.Icon($Path)).Clone()
+            if (-not [string]::IsNullOrWhiteSpace($CacheKey)) {
+                $script:ThemeIcons[$CacheKey] = $icon
+            }
+            return $icon
+        }
+
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $loaded = [System.Drawing.Image]::FromStream($stream)
+            try {
+                return (New-IconFromImage -Image $loaded -CacheKey $CacheKey)
+            }
+            finally {
+                $loaded.Dispose()
+            }
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        Write-AppLog -Event 'AppIconLoadFailed' -Message ('{0}：{1}' -f $Path, $_.Exception.Message) -Level 'WARN'
+        return [System.Drawing.SystemIcons]::Information
+    }
+}
+
+function New-BitmapFromIcon {
+    param(
+        [System.Drawing.Icon]$Icon,
+        [int]$Size = 42
+    )
+
+    if ($null -eq $Icon) {
+        return $null
+    }
+
+    $bitmap = New-Object System.Drawing.Bitmap($Size, $Size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.Clear([System.Drawing.Color]::Transparent)
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.DrawIcon($Icon, (New-Object System.Drawing.Rectangle(0, 0, $Size, $Size)))
+    }
+    finally {
+        $graphics.Dispose()
+    }
+
+    return $bitmap
 }
 
 function Get-ThemeIcon {
@@ -534,40 +754,25 @@ function Get-ThemeIcon {
         return [System.Drawing.SystemIcons]::Information
     }
 
-    if ($script:ThemeIcons.ContainsKey($themeMode)) {
-        return $script:ThemeIcons[$themeMode]
-    }
-
     $image = Get-ThemeImage -Theme $themeMode -Kind 'badge'
-    if ($null -eq $image) {
-        return [System.Drawing.SystemIcons]::Information
+    return (New-IconFromImage -Image $image -CacheKey ('theme:{0}' -f $themeMode))
+}
+
+function Get-AppIcon {
+    $preference = Get-AppIconPreference
+    if ($preference.Mode -eq 'BuiltIn') {
+        $path = Get-BuiltInIconPath -Key $preference.BuiltIn
+        if ($path) {
+            return (Get-IconFromFile -Path $path -CacheKey ('builtin:{0}' -f $preference.BuiltIn))
+        }
+    }
+    elseif ($preference.Mode -eq 'Custom') {
+        if (Test-Path -LiteralPath $preference.CustomPath -PathType Leaf) {
+            return (Get-IconFromFile -Path $preference.CustomPath -CacheKey ('custom:{0}' -f $preference.CustomPath))
+        }
     }
 
-    $bmp = New-Object System.Drawing.Bitmap(32, 32, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-    try {
-        $graphics.Clear([System.Drawing.Color]::Transparent)
-        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-        $graphics.DrawImage($image, 0, 0, 32, 32)
-    }
-    finally {
-        $graphics.Dispose()
-    }
-
-    try {
-        $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon()).Clone()
-        $script:ThemeIcons[$themeMode] = $icon
-        return $icon
-    }
-    catch {
-        Write-AppLog -Event 'ThemeIconCreateFailed' -Message $_.Exception.Message -Level 'WARN'
-        return [System.Drawing.SystemIcons]::Information
-    }
-    finally {
-        $bmp.Dispose()
-    }
+    return (Get-ThemeIcon -Theme $script:Config.Preferences.Theme)
 }
 
 function Set-FormThemeIdentity {
@@ -582,7 +787,7 @@ function Set-FormThemeIdentity {
 
     $Form.Text = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme -Suffix $Suffix
     try {
-        $Form.Icon = Get-ThemeIcon -Theme $script:Config.Preferences.Theme
+        $Form.Icon = Get-AppIcon
     }
     catch {
     }
@@ -640,6 +845,23 @@ function Set-ThemeColors {
         $script:Colors.OrangeSoft = [System.Drawing.Color]::FromArgb(255, 239, 148)
         $script:Colors.Purple = [System.Drawing.Color]::FromArgb(86, 65, 39)
         $script:Colors.PurpleSoft = [System.Drawing.Color]::FromArgb(244, 227, 170)
+        return
+    }
+
+    if ($themeMode -eq 'LineDog') {
+        $script:Colors.Background = [System.Drawing.Color]::FromArgb(255, 248, 232)
+        $script:Colors.Surface = [System.Drawing.Color]::FromArgb(255, 253, 246)
+        $script:Colors.Text = [System.Drawing.Color]::FromArgb(72, 48, 31)
+        $script:Colors.Muted = [System.Drawing.Color]::FromArgb(136, 108, 78)
+        $script:Colors.Border = [System.Drawing.Color]::FromArgb(236, 211, 173)
+        $script:Colors.Blue = [System.Drawing.Color]::FromArgb(65, 141, 198)
+        $script:Colors.BlueSoft = [System.Drawing.Color]::FromArgb(225, 242, 255)
+        $script:Colors.Green = [System.Drawing.Color]::FromArgb(83, 166, 124)
+        $script:Colors.GreenSoft = [System.Drawing.Color]::FromArgb(229, 248, 235)
+        $script:Colors.Orange = [System.Drawing.Color]::FromArgb(230, 157, 63)
+        $script:Colors.OrangeSoft = [System.Drawing.Color]::FromArgb(255, 239, 207)
+        $script:Colors.Purple = [System.Drawing.Color]::FromArgb(205, 119, 91)
+        $script:Colors.PurpleSoft = [System.Drawing.Color]::FromArgb(255, 231, 219)
         return
     }
 
@@ -1129,7 +1351,7 @@ function Apply-MainTheme {
         $c.ThemeBanner.BackColor = Get-ThemeImageBackColor -Theme $script:Config.Preferences.Theme
     }
     if ($script:TrayIcon) {
-        $script:TrayIcon.Icon = Get-ThemeIcon -Theme $script:Config.Preferences.Theme
+        $script:TrayIcon.Icon = Get-AppIcon
         $script:TrayIcon.Text = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme
     }
     $c.ClockCaption.ForeColor = $script:Colors.Muted
@@ -1216,54 +1438,187 @@ function Apply-MainThemeLayout {
 
     $c = $script:MainThemeControls
     $themeMode = Get-ThemeMode -Value $script:Config.Preferences.Theme
-    if ($themeMode -eq 'Kuromi') {
-        if ($c.Form.ClientSize.Width -lt 720 -or $c.Form.ClientSize.Height -lt 530) {
-            $c.Form.ClientSize = New-Object System.Drawing.Size(720, 530)
-        }
-        $c.Form.MinimumSize = New-Object System.Drawing.Size(680, 520)
-        $c.ThemeBanner.Location = New-Object System.Drawing.Point(28, 14)
-        $c.ThemeBanner.Size = New-Object System.Drawing.Size(660, 86)
-        $c.ThemeBanner.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-        $c.ThemeIcon.Location = New-Object System.Drawing.Point(28, 108)
-        $c.ThemeIcon.Size = New-Object System.Drawing.Size(64, 64)
-        $c.ThemeIcon.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-        $c.ClockPanel.Location = New-Object System.Drawing.Point(478, 110)
-        $c.Subtitle.Location = New-Object System.Drawing.Point(108, 118)
-        $c.ThemeBadge.Location = New-Object System.Drawing.Point(108, 146)
-        $c.Card.Location = New-Object System.Drawing.Point(28, 182)
-        $c.BtnCompany.Location = New-Object System.Drawing.Point(28, 422)
-        $c.BtnTrip.Location = New-Object System.Drawing.Point(138, 422)
-        $c.BtnTest.Location = New-Object System.Drawing.Point(248, 422)
-        $c.BtnCustom.Location = New-Object System.Drawing.Point(358, 422)
-        $c.BtnSettings.Location = New-Object System.Drawing.Point(468, 422)
-        $c.BtnExit.Location = New-Object System.Drawing.Point(608, 422)
-        $c.BtnPauseToday.Location = New-Object System.Drawing.Point(468, 480)
-        $c.Tip.Location = New-Object System.Drawing.Point(28, 488)
-        return
+
+    $isKuromi = ($themeMode -eq 'Kuromi')
+    $usesWideBanner = ($themeMode -eq 'Kuromi' -or $themeMode -eq 'LineDog')
+    $baseW = 720
+    $baseH = if ($usesWideBanner) { 530 } else { 500 }
+    $minH = if ($usesWideBanner) { 520 } else { 460 }
+    $c.Form.MinimumSize = New-Object System.Drawing.Size(680, $minH)
+
+    $w = [Math]::Max($c.Form.ClientSize.Width, 680)
+    $h = [Math]::Max($c.Form.ClientSize.Height, $minH)
+    $scale = [Math]::Min(($w / $baseW), ($h / $baseH))
+    $scale = [Math]::Max(1.0, [Math]::Min(1.55, $scale))
+    $layoutW = [int][Math]::Round($baseW * $scale)
+    $layoutH = [int][Math]::Round($baseH * $scale)
+    $offsetX = [Math]::Max(0, [int][Math]::Floor(($w - $layoutW) / 2))
+    $offsetY = [Math]::Max(0, [int][Math]::Floor(($h - $layoutH) / 2))
+
+    function Convert-MainLayoutValue {
+        param([double]$Value)
+        return [int][Math]::Round($Value * $scale)
     }
 
-    if ($c.Form.ClientSize.Width -lt 720 -or $c.Form.ClientSize.Height -gt 500) {
-        $c.Form.ClientSize = New-Object System.Drawing.Size(720, 500)
+    function New-MainLayoutPoint {
+        param(
+            [double]$X,
+            [double]$Y
+        )
+        return (New-Object System.Drawing.Point(($offsetX + (Convert-MainLayoutValue $X)), ($offsetY + (Convert-MainLayoutValue $Y))))
     }
-    $c.Form.MinimumSize = New-Object System.Drawing.Size(680, 460)
-    $c.ThemeBanner.Location = New-Object System.Drawing.Point(378, 86)
-    $c.ThemeBanner.Size = New-Object System.Drawing.Size(310, 22)
+
+    function New-MainLayoutSize {
+        param(
+            [double]$Width,
+            [double]$Height
+        )
+        return (New-Object System.Drawing.Size((Convert-MainLayoutValue $Width), (Convert-MainLayoutValue $Height)))
+    }
+
+    function New-MainScaledPoint {
+        param(
+            [double]$X,
+            [double]$Y
+        )
+        return (New-Object System.Drawing.Point((Convert-MainLayoutValue $X), (Convert-MainLayoutValue $Y)))
+    }
+
+    function Set-MainLayoutFont {
+        param(
+            [System.Windows.Forms.Control]$Control,
+            [double]$Size,
+            [System.Drawing.FontStyle]$Style = [System.Drawing.FontStyle]::Regular
+        )
+        if ($null -eq $Control) {
+            return
+        }
+
+        $fontSize = [Math]::Max(8, [Math]::Min(24, ($Size * $scale)))
+        $Control.Font = New-Object System.Drawing.Font('Segoe UI', $fontSize, $Style)
+    }
+
     $c.ThemeBanner.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-    $c.ThemeIcon.Location = New-Object System.Drawing.Point(28, 26)
-    $c.ThemeIcon.Size = New-Object System.Drawing.Size(64, 64)
     $c.ThemeIcon.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-    $c.ClockPanel.Location = New-Object System.Drawing.Point(478, 28)
-    $c.Subtitle.Location = New-Object System.Drawing.Point(108, 38)
-    $c.ThemeBadge.Location = New-Object System.Drawing.Point(108, 66)
-    $c.Card.Location = New-Object System.Drawing.Point(28, 112)
-    $c.BtnCompany.Location = New-Object System.Drawing.Point(28, 356)
-    $c.BtnTrip.Location = New-Object System.Drawing.Point(138, 356)
-    $c.BtnTest.Location = New-Object System.Drawing.Point(248, 356)
-    $c.BtnCustom.Location = New-Object System.Drawing.Point(358, 356)
-    $c.BtnSettings.Location = New-Object System.Drawing.Point(468, 356)
-    $c.BtnExit.Location = New-Object System.Drawing.Point(608, 356)
-    $c.BtnPauseToday.Location = New-Object System.Drawing.Point(468, 414)
-    $c.Tip.Location = New-Object System.Drawing.Point(28, 422)
+    if ($c.Top) {
+        $c.Top.Height = 0
+    }
+
+    if ($usesWideBanner) {
+        $c.ThemeBanner.Location = New-MainLayoutPoint 28 14
+        $c.ThemeBanner.Size = New-MainLayoutSize 660 86
+        $c.ThemeIcon.Location = New-MainLayoutPoint 28 108
+        $c.ClockPanel.Location = New-MainLayoutPoint 478 110
+        $c.Subtitle.Location = New-MainLayoutPoint 108 118
+        $c.ThemeBadge.Location = New-MainLayoutPoint 108 146
+        $cardY = 182
+        $cardH = 216
+        $buttonY = 422
+        $tipY = 488
+    }
+    else {
+        $c.ThemeBanner.Location = New-MainLayoutPoint 378 86
+        $c.ThemeBanner.Size = New-MainLayoutSize 310 22
+        $c.ThemeIcon.Location = New-MainLayoutPoint 28 26
+        $c.ClockPanel.Location = New-MainLayoutPoint 478 28
+        $c.Subtitle.Location = New-MainLayoutPoint 108 38
+        $c.ThemeBadge.Location = New-MainLayoutPoint 108 66
+        $cardY = 112
+        $cardH = 220
+        $buttonY = 356
+        $tipY = 422
+    }
+
+    $c.ThemeIcon.Size = New-MainLayoutSize 64 64
+    $c.ClockPanel.Size = New-MainLayoutSize 210 58
+    $c.Card.Location = New-MainLayoutPoint 28 $cardY
+    $c.Card.Size = New-MainLayoutSize 660 $cardH
+    $scaledCardH = $c.Card.Height
+
+    if ($script:StatusLabel) {
+        $script:StatusLabel.Location = New-MainScaledPoint 20 48
+        Set-MainLayoutFont -Control $script:StatusLabel -Size 12
+    }
+    if ($script:DetailLabel) {
+        $script:DetailLabel.Location = New-MainScaledPoint 20 ($cardH - 42)
+        $script:DetailLabel.Size = New-MainLayoutSize 620 28
+        Set-MainLayoutFont -Control $script:DetailLabel -Size 10
+    }
+
+    if ($script:DailyReminderRows) {
+        $rowTops = @(82, 112, 142)
+        $index = 0
+        foreach ($name in 'Lunch', 'Dinner', 'Overtime') {
+            if (-not $script:DailyReminderRows.ContainsKey($name)) {
+                continue
+            }
+
+            $row = $script:DailyReminderRows[$name]
+            $top = $rowTops[$index]
+            $row.TimeLabel.Location = New-MainScaledPoint 20 $top
+            $row.TimeLabel.Size = New-MainLayoutSize 190 26
+            $row.StateLabel.Location = New-MainScaledPoint 226 $top
+            $row.StateLabel.Size = New-MainLayoutSize 250 26
+            $row.ToggleButton.Location = New-MainScaledPoint 548 ($top - 1)
+            $row.ToggleButton.Size = New-MainLayoutSize 92 28
+            Set-MainLayoutFont -Control $row.TimeLabel -Size 10.5
+            Set-MainLayoutFont -Control $row.StateLabel -Size 9.5
+            Set-MainLayoutFont -Control $row.ToggleButton -Size 9
+            $index++
+        }
+    }
+
+    $c.BtnCompany.Location = New-MainLayoutPoint 28 $buttonY
+    $c.BtnTrip.Location = New-MainLayoutPoint 138 $buttonY
+    $c.BtnTest.Location = New-MainLayoutPoint 248 $buttonY
+    $c.BtnCustom.Location = New-MainLayoutPoint 358 $buttonY
+    foreach ($button in @($c.BtnCompany, $c.BtnTrip, $c.BtnTest, $c.BtnCustom)) {
+        if ($button) {
+            $button.Size = New-MainLayoutSize 102 44
+            Set-MainLayoutFont -Control $button -Size 9
+        }
+    }
+
+    if ($c.StatusTitle) {
+        $c.StatusTitle.Location = New-MainScaledPoint 20 18
+        Set-MainLayoutFont -Control $c.StatusTitle -Size 11 -Style ([System.Drawing.FontStyle]::Bold)
+    }
+    if ($c.Title) {
+        $c.Title.Location = if ($usesWideBanner) { New-MainLayoutPoint 108 92 } else { New-MainLayoutPoint 28 30 }
+        Set-MainLayoutFont -Control $c.Title -Size 22 -Style ([System.Drawing.FontStyle]::Bold)
+    }
+    if ($c.Subtitle) {
+        Set-MainLayoutFont -Control $c.Subtitle -Size 9
+    }
+    if ($c.ThemeBadge) {
+        Set-MainLayoutFont -Control $c.ThemeBadge -Size 9.5 -Style ([System.Drawing.FontStyle]::Bold)
+    }
+    if ($c.ClockCaption) {
+        $c.ClockCaption.Location = New-MainScaledPoint 14 10
+        $c.ClockCaption.Size = New-MainLayoutSize 70 22
+        Set-MainLayoutFont -Control $c.ClockCaption -Size 9
+    }
+    if ($script:ClockLabel) {
+        $script:ClockLabel.Location = New-MainScaledPoint 88 6
+        $script:ClockLabel.Size = New-MainLayoutSize 108 26
+        Set-MainLayoutFont -Control $script:ClockLabel -Size 15 -Style ([System.Drawing.FontStyle]::Bold)
+    }
+    if ($script:ClockDateLabel) {
+        $script:ClockDateLabel.Location = New-MainScaledPoint 14 34
+        $script:ClockDateLabel.Size = New-MainLayoutSize 182 18
+        Set-MainLayoutFont -Control $script:ClockDateLabel -Size 8.5
+    }
+
+    $hiddenX = $w + 40
+    $c.BtnSettings.Location = New-Object System.Drawing.Point($hiddenX, (Convert-MainLayoutValue $buttonY))
+    $c.BtnExit.Location = New-Object System.Drawing.Point($hiddenX, (Convert-MainLayoutValue $buttonY))
+    $c.BtnPauseToday.Location = New-Object System.Drawing.Point($hiddenX, (Convert-MainLayoutValue ($buttonY + 56)))
+    $c.Tip.Location = New-MainLayoutPoint 28 $tipY
+    Set-MainLayoutFont -Control $c.Tip -Size 9
+
+    if ($c.Card.Height -lt $scaledCardH) {
+        $c.Card.Height = $scaledCardH
+    }
 }
 
 function Get-StartupShortcutPath {
@@ -1432,12 +1787,21 @@ function Set-AutoStartEnabled {
 
 function Get-DefaultConfig {
     return [pscustomobject]@{
-        Version = 8
+        Version = 11
         Mode = 'Company'
         Preferences = [pscustomobject]@{
             Theme = 'Light'
-            SoundEnabled = $true
+            SoundEnabled = $false
             StrongPopup = $false
+            Window = [pscustomobject]@{
+                Width = 750
+                Height = 560
+            }
+            Icon = [pscustomobject]@{
+                Mode = 'FollowTheme'
+                BuiltIn = ''
+                CustomPath = ''
+            }
             FocusDoNotDisturb = [pscustomobject]@{
                 Enabled = $false
                 IdleSeconds = 60
@@ -1475,6 +1839,8 @@ function Get-DefaultConfig {
                 Time = '11:27'
                 Title = '午饭时间到'
                 Message = '中午 11:27 到啦，先去吃饭。'
+                MessageMode = 'Default'
+                CustomMessage = ''
                 LastFiredDate = $null
             }
             Dinner = [pscustomobject]@{
@@ -1482,6 +1848,8 @@ function Get-DefaultConfig {
                 Time = '17:37'
                 Title = '晚饭时间到'
                 Message = '下午 17:37 到啦，去吃晚饭。'
+                MessageMode = 'Default'
+                CustomMessage = ''
                 LastFiredDate = $null
             }
             Overtime = [pscustomobject]@{
@@ -1489,6 +1857,8 @@ function Get-DefaultConfig {
                 Time = '20:58'
                 Title = '加班结束'
                 Message = '晚上 20:58 到啦，今天可以收工了。'
+                MessageMode = 'Default'
+                CustomMessage = ''
                 LastFiredDate = $null
             }
         }
@@ -1527,6 +1897,27 @@ function Merge-Config {
         }
         if ($Loaded.Preferences.PSObject.Properties.Name -contains 'StrongPopup') {
             $default.Preferences.StrongPopup = [bool]$Loaded.Preferences.StrongPopup
+        }
+        if ($Loaded.Preferences.PSObject.Properties.Name -contains 'Window' -and $Loaded.Preferences.Window) {
+            $window = $Loaded.Preferences.Window
+            if ($window.PSObject.Properties.Name -contains 'Width') {
+                $default.Preferences.Window.Width = [Math]::Max(680, [Math]::Min(1400, [int]$window.Width))
+            }
+            if ($window.PSObject.Properties.Name -contains 'Height') {
+                $default.Preferences.Window.Height = [Math]::Max(520, [Math]::Min(1000, [int]$window.Height))
+            }
+        }
+        if ($Loaded.Preferences.PSObject.Properties.Name -contains 'Icon' -and $Loaded.Preferences.Icon) {
+            $icon = $Loaded.Preferences.Icon
+            if ($icon.PSObject.Properties.Name -contains 'Mode' -and ([string]$icon.Mode) -in @('FollowTheme', 'BuiltIn', 'Custom')) {
+                $default.Preferences.Icon.Mode = [string]$icon.Mode
+            }
+            if ($icon.PSObject.Properties.Name -contains 'BuiltIn') {
+                $default.Preferences.Icon.BuiltIn = [string]$icon.BuiltIn
+            }
+            if ($icon.PSObject.Properties.Name -contains 'CustomPath') {
+                $default.Preferences.Icon.CustomPath = [string]$icon.CustomPath
+            }
         }
         if ($Loaded.Preferences.PSObject.Properties.Name -contains 'FocusDoNotDisturb' -and $Loaded.Preferences.FocusDoNotDisturb) {
             $focus = $Loaded.Preferences.FocusDoNotDisturb
@@ -1584,7 +1975,7 @@ function Merge-Config {
     if ($Loaded.PSObject.Properties.Name -contains 'DailyReminders' -and $Loaded.DailyReminders) {
         foreach ($name in 'Lunch', 'Dinner', 'Overtime') {
             if ($Loaded.DailyReminders.PSObject.Properties.Name -contains $name) {
-                foreach ($prop in 'Enabled', 'Time', 'Title', 'Message', 'LastFiredDate') {
+                foreach ($prop in 'Enabled', 'Time', 'Title', 'Message', 'MessageMode', 'CustomMessage', 'LastFiredDate') {
                     if ($Loaded.DailyReminders.$name.PSObject.Properties.Name -contains $prop) {
                         $default.DailyReminders.$name.$prop = $Loaded.DailyReminders.$name.$prop
                     }
@@ -1606,12 +1997,26 @@ function Merge-Config {
                 continue
             }
 
-            $timeText = if ($item.PSObject.Properties.Name -contains 'Time') { [string]$item.Time } else { '' }
-            try {
-                [void](Get-TimeOfDay -Value $timeText)
+            $atText = if ($item.PSObject.Properties.Name -contains 'At') { [string]$item.At } else { '' }
+            $atValue = $null
+            if (-not [string]::IsNullOrWhiteSpace($atText)) {
+                $atValue = Ensure-DateTime $atText
+                if ($null -eq $atValue) {
+                    $atText = ''
+                }
             }
-            catch {
-                continue
+
+            $timeText = if ($item.PSObject.Properties.Name -contains 'Time') { [string]$item.Time } else { '' }
+            if ($null -eq $atValue) {
+                try {
+                    [void](Get-TimeOfDay -Value $timeText)
+                }
+                catch {
+                    continue
+                }
+            }
+            elseif ([string]::IsNullOrWhiteSpace($timeText)) {
+                $timeText = $atValue.ToString('HH:mm')
             }
 
             $idText = if ($item.PSObject.Properties.Name -contains 'Id' -and -not [string]::IsNullOrWhiteSpace([string]$item.Id)) {
@@ -1650,7 +2055,7 @@ function Merge-Config {
                 $strongValue = [bool]$item.Strong
             }
 
-            $soundValue = $true
+            $soundValue = $false
             if ($item.PSObject.Properties.Name -contains 'Sound') {
                 $soundValue = [bool]$item.Sound
             }
@@ -1658,6 +2063,7 @@ function Merge-Config {
             $customItems.Add([pscustomobject]@{
                 Id = $idText
                 Enabled = $enabledValue
+                At = if ($null -ne $atValue) { $atValue.ToString('o') } else { $null }
                 Time = $timeText
                 Title = $titleText
                 Message = $messageText
@@ -1693,7 +2099,76 @@ function Add-Utf8Line {
     [System.IO.File]::AppendAllText($Path, $Text + [Environment]::NewLine, $script:Utf8NoBom)
 }
 
+function Initialize-MealStatsStorage {
+    if (Test-Path -LiteralPath $script:StatsPath -PathType Leaf) {
+        return
+    }
+
+    $sourceLines = New-Object System.Collections.Generic.List[string]
+    foreach ($path in @($script:LegacyLogPath, $script:LogPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
+
+        try {
+            foreach ($line in ((Read-Utf8Text -Path $path) -split "\r\n|\n|\r")) {
+                if ($line -match '^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+(DailyFired|SnoozeSet)\s+-\s+') {
+                    $sourceLines.Add($line)
+                }
+            }
+        }
+        catch {
+        }
+    }
+
+    if ($sourceLines.Count -gt 0) {
+        Write-Utf8Text -Path $script:StatsPath -Text (($sourceLines -join [Environment]::NewLine) + [Environment]::NewLine)
+    }
+    else {
+        if (-not (Test-Path -LiteralPath $script:StatsPath -PathType Leaf)) {
+            Write-Utf8Text -Path $script:StatsPath -Text ''
+        }
+    }
+}
+
+function Add-MealStatsLine {
+    param([string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $script:StatsPath -PathType Leaf)) {
+            [System.IO.File]::WriteAllText($script:StatsPath, '', $script:Utf8NoBom)
+        }
+        Add-Utf8Line -Path $script:StatsPath -Text $Line
+    }
+    catch {
+    }
+}
+
+function Initialize-AppStorage {
+    foreach ($dir in @($script:AppDataRoot, $script:ConfigDir, $script:LogDir, $script:StateDir)) {
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+    }
+
+    Initialize-MealStatsStorage
+
+    if ((-not (Test-Path -LiteralPath $script:ConfigPath -PathType Leaf)) -and (Test-Path -LiteralPath $script:LegacyConfigPath -PathType Leaf)) {
+        try {
+            Move-Item -LiteralPath $script:LegacyConfigPath -Destination $script:ConfigPath -Force
+        }
+        catch {
+            Copy-Item -LiteralPath $script:LegacyConfigPath -Destination $script:ConfigPath -Force
+        }
+    }
+}
+
 function Load-Config {
+    Initialize-AppStorage
     if (Test-Path -LiteralPath $script:ConfigPath) {
         try {
             $raw = Read-Utf8Text -Path $script:ConfigPath
@@ -1712,8 +2187,53 @@ function Load-Config {
 }
 
 function Save-Config {
+    Initialize-AppStorage
     $json = $script:Config | ConvertTo-Json -Depth 8
     Write-Utf8Text -Path $script:ConfigPath -Text $json
+}
+
+function Get-MainWindowClientSize {
+    $width = 750
+    $height = 560
+
+    if ($script:Config -and $script:Config.Preferences -and ($script:Config.Preferences.PSObject.Properties.Name -contains 'Window') -and $script:Config.Preferences.Window) {
+        $window = $script:Config.Preferences.Window
+        if ($window.PSObject.Properties.Name -contains 'Width') {
+            $width = [int]$window.Width
+        }
+        if ($window.PSObject.Properties.Name -contains 'Height') {
+            $height = [int]$window.Height
+        }
+    }
+
+    $width = [Math]::Max(680, [Math]::Min(1400, $width))
+    $height = [Math]::Max(520, [Math]::Min(1000, $height))
+    return (New-Object System.Drawing.Size($width, $height))
+}
+
+function Save-MainWindowClientSize {
+    param([System.Windows.Forms.Form]$Form)
+
+    if ($null -eq $Form -or $Form.IsDisposed -or $null -eq $script:Config -or $null -eq $script:Config.Preferences) {
+        return
+    }
+
+    if ($Form.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) {
+        return
+    }
+
+    $width = [Math]::Max(680, [Math]::Min(1400, [int]$Form.ClientSize.Width))
+    $height = [Math]::Max(520, [Math]::Min(1000, [int]$Form.ClientSize.Height))
+
+    if (-not ($script:Config.Preferences.PSObject.Properties.Name -contains 'Window') -or $null -eq $script:Config.Preferences.Window) {
+        $script:Config.Preferences | Add-Member -MemberType NoteProperty -Name Window -Value ([pscustomobject]@{ Width = $width; Height = $height }) -Force
+    }
+    else {
+        $script:Config.Preferences.Window | Add-Member -MemberType NoteProperty -Name Width -Value $width -Force
+        $script:Config.Preferences.Window | Add-Member -MemberType NoteProperty -Name Height -Value $height -Force
+    }
+
+    Save-Config
 }
 
 function Write-AppLog {
@@ -1724,10 +2244,14 @@ function Write-AppLog {
     )
 
     try {
+        Initialize-AppStorage
         $safeEvent = if ([string]::IsNullOrWhiteSpace($Event)) { 'General' } else { $Event.Trim() }
         $safeMessage = if ($null -eq $Message) { '' } else { ($Message -replace "(`r`n|`n|`r)", ' ').Trim() }
         $line = '{0} [{1}] {2} - {3}' -f ([datetime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Level, $safeEvent, $safeMessage
         Add-Utf8Line -Path $script:LogPath -Text $line
+        if ($safeEvent -in @('DailyFired', 'SnoozeSet')) {
+            Add-MealStatsLine -Line $line
+        }
     }
     catch {
     }
@@ -1893,6 +2417,7 @@ function Get-SingleReminderCandidate {
 
 function Request-MainWindowShow {
     try {
+        Initialize-AppStorage
         Set-Content -LiteralPath $script:ShowRequestPath -Value ([datetime]::Now.ToString('o')) -Encoding UTF8
     }
     catch {
@@ -1918,6 +2443,7 @@ function Check-MainWindowShowRequest {
 
     try {
         $request = (Get-Content -LiteralPath $script:ShowRequestPath -Raw -Encoding UTF8).Trim()
+        Remove-Item -LiteralPath $script:ShowRequestPath -Force -ErrorAction SilentlyContinue
     }
     catch {
         return
@@ -2027,8 +2553,22 @@ function Get-DailyReminderLabel {
 function Get-DailyReminderMessage {
     param(
         [string]$Name,
-        [string]$TimeText
+        [string]$TimeText,
+        [string]$MessageMode = 'Default',
+        [string]$CustomMessage = ''
     )
+
+    switch ($MessageMode) {
+        'Custom' {
+            if (-not [string]::IsNullOrWhiteSpace($CustomMessage)) {
+                return $CustomMessage.Trim()
+            }
+            break
+        }
+        'Random' {
+            return (Get-DailyReminderRandomMessage -Name $Name -TimeText $TimeText)
+        }
+    }
 
     switch ($Name) {
         'Lunch' { return ('中午 {0} 到啦，先去吃饭。' -f $TimeText) }
@@ -2036,6 +2576,135 @@ function Get-DailyReminderMessage {
         'Overtime' { return ('晚上 {0} 到啦，今天可以收工了。' -f $TimeText) }
         default { return ('{0} 到啦。' -f $TimeText) }
     }
+}
+
+function Get-DailyReminderRandomMessagePool {
+    param([string]$Name)
+
+    return @(
+        '饭点已到，打工人开始补充燃料。'
+        '别卷了，饭先卷进嘴里。'
+        '工位可以晚点回，饭不能晚点吃。'
+        '你的胃发来紧急工单：请立即处理。'
+        '现在不去，电梯和饭堂都会背叛你。'
+        '饭点不是提醒，是撤退信号。'
+        '再不出发，排队的人会比 Bug 还多。'
+        '打工可以延迟，干饭不能超时。'
+        '你的 CPU 过热，请摄入碳水降温。'
+        '检测到血糖下降，建议立即启动干饭流程。'
+        '电梯窗口期已开启，立即出击。'
+        '再慢三分钟，你将加入电梯长征队。'
+        '当前适合抢电梯，错过请等下一波人潮。'
+        '电梯还没爆满，现在是最佳撤离时间。'
+        '快走，电梯容量正在被同事占领。'
+        '干饭路线规划完成，请立即前往电梯口。'
+        '温馨提示：电梯不会等你，饭也不会。'
+        '当前人流量较低，建议马上偷跑。'
+        '抢电梯黄金时间已到，冲！'
+        '再犹豫，电梯就要进入地狱模式了。'
+        '小肚子咕咕叫啦，该去吃饭啦。'
+        '今天也要好好吃饭呀。'
+        '饭饭时间到，先照顾一下自己吧。'
+        '小狗提醒你：该干饭啦，汪！'
+        '不管上午多累，饭要认真吃。'
+        '你的能量条快空了，请补充饭饭。'
+        '叮咚，今日份快乐饭点已送达。'
+        '先吃饭，剩下的烦恼等会儿再说。'
+        '胃胃说它想见见米饭。'
+        '乖，去吃饭，别饿着自己。'
+        '汪汪提醒：不吃饭会变笨一点点。'
+        '两只小狗一致认为：现在必须吃饭。'
+        '小狗雷达检测到饭香，请立即出发。'
+        '小饭碗已经准备好啦，快去吃饭。'
+        '小狗拍了拍你：别工作了，吃饭去。'
+        '今日任务：吃饭、回血、继续做人。'
+        '小狗说：饭可以治愈 80% 的上班怨气。'
+        '食堂刷新时间已到，请立刻前往。'
+        '餐厅即将进入排队副本，请提前进场。'
+        '今日干饭副本已开启，建议组队前往。'
+        '距离热门菜售罄还有未知时间，快冲。'
+        '饭堂 NPC 已上线，请前往领取午餐。'
+        '再晚一点，好菜就变成传说了。'
+        '当前适合打饭，不适合犹豫。'
+        '食堂窗口已开放，干饭人请集合。'
+        '前方发现饭菜资源，建议立即采集。'
+        '饭点战斗开始，请带上饭卡和尊严。'
+        '该暂停一下啦，先去吃饭吧。'
+        '忙了一上午，去吃点东西补补能量。'
+        '工作先放一放，身体更重要。'
+        '饭点到了，别让自己饿太久。'
+        '先好好吃饭，下午才有力气继续。'
+        '给自己一点休息时间吧。'
+        '今天也辛苦了，去吃饭吧。'
+        '该让大脑和胃都休息一下了。'
+        '吃饭不是偷懒，是续航。'
+        '请暂时退出工作模式，进入吃饭模式。'
+        '系统检测到饭点：建议立即离开工位。'
+        '当前状态：饥饿值上升，工作效率下降。'
+        '提醒任务触发：请前往餐厅。'
+        '干饭进程已启动，请勿取消。'
+        '警告：继续工作可能导致怨气积累。'
+        '低电量模式已开启，请摄入午餐。'
+        '饭点事件已触发，等待用户响应。'
+        '检测到你正在硬撑，系统建议吃饭。'
+        '当前最佳策略：保存工作，立即干饭。'
+        '请注意，胃部服务正在请求响应。'
+        '别装忙了，饭点到了。'
+        '你可以不优秀，但不能不吃饭。'
+        '再不去吃饭，下午只剩灵魂在上班。'
+        '代码不会跑，但饭会被别人打完。'
+        '老板可以画饼，你得吃真饭。'
+        '你的工位不差你这几分钟，食堂差。'
+        '别和工作培养感情了，先和米饭培养。'
+        '你不是机器，机器还得充电呢。'
+        '别硬扛了，午饭不是可选项。'
+        '再不吃饭，你就要开始恨全世界了。'
+        '晚饭时间到，今日打工进度暂停。'
+        '可以下班干饭了，灵魂请求归位。'
+        '今天的疲惫，先交给晚饭处理。'
+        '夕阳下班，打工人吃饭。'
+        '晚饭是今天最后的温柔补丁。'
+        '别让晚饭等太久，它会伤心。'
+        '今日份续命晚餐已到点。'
+        '打工结束前，先把胃安顿好。'
+        '夜晚模式启动，请先吃饭。'
+        '今天也活下来了，吃顿好的吧。'
+        '今日宜干饭，忌空腹硬撑。'
+        '前方高能：饭来了。'
+        '别问，问就是该吃饭了。'
+        '饭点到了，所有烦恼暂停营业。'
+        '吃饭去吧，世界不会因为你离开工位十分钟而崩塌。'
+        '胃：我已经忍你很久了。'
+        '现在出发，还能假装自己很从容。'
+        '干饭不积极，思想有问题。'
+        '饭点到了，速速归队。'
+        '保存当前工作，加载今日饭菜。'
+    )
+}
+
+function Get-DailyReminderRandomMessage {
+    param(
+        [string]$Name,
+        [string]$TimeText
+    )
+
+    $pool = @(Get-DailyReminderRandomMessagePool -Name $Name)
+    if ($pool.Count -eq 0) {
+        return (Get-DailyReminderMessage -Name $Name -TimeText $TimeText -MessageMode 'Default')
+    }
+
+    $seedText = '{0}|{1}|{2}' -f (Get-Date).ToString('yyyy-MM-dd'), $Name, $TimeText
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($seedText)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash($bytes)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    $value = [System.BitConverter]::ToUInt32($hash, 0)
+    return $pool[[int]($value % [uint32]$pool.Count)]
 }
 
 function Get-DailyReminderTimeParts {
@@ -2071,11 +2740,211 @@ function Set-DailyReminderSettings {
     $changed = ([bool]$item.Enabled -ne $Enabled) -or ([string]$item.Time -ne $TimeText)
     $item.Enabled = $Enabled
     $item.Time = $TimeText
-    $item.Message = Get-DailyReminderMessage -Name $Name -TimeText $TimeText
+    $messageMode = if ($item.PSObject.Properties.Name -contains 'MessageMode') { [string]$item.MessageMode } else { 'Default' }
+    $customMessage = if ($item.PSObject.Properties.Name -contains 'CustomMessage') { [string]$item.CustomMessage } else { '' }
+    $item.Message = Get-DailyReminderMessage -Name $Name -TimeText $TimeText -MessageMode $messageMode -CustomMessage $customMessage
 
     if ($changed) {
         $item.LastFiredDate = $null
     }
+}
+
+function Get-DailyReminderMessageSummary {
+    param([object]$Item)
+
+    if ($null -eq $Item) {
+        return '默认'
+    }
+
+    $mode = if ($Item.PSObject.Properties.Name -contains 'MessageMode') { [string]$Item.MessageMode } else { 'Default' }
+    switch ($mode) {
+        'Custom' {
+            $text = if ($Item.PSObject.Properties.Name -contains 'CustomMessage') { [string]$Item.CustomMessage } else { '' }
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                return '自定义(空)'
+            }
+            $text = $text.Trim()
+            if ($text.Length -gt 8) {
+                return ($text.Substring(0, 8) + '...')
+            }
+            return $text
+        }
+        'Random' { return '随机' }
+        default { return '默认' }
+    }
+}
+
+function Show-DailyReminderMessageDialog {
+    param(
+        [System.Windows.Forms.Form]$OwnerForm,
+        [string]$Name
+    )
+
+    $item = $script:Config.DailyReminders.$Name
+    if ($null -eq $item) {
+        return
+    }
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = ('{0}消息设置' -f (Get-DailyReminderLabel -Name $Name))
+    Set-FormThemeIdentity -Form $dialog -Suffix ('{0}消息设置' -f (Get-DailyReminderLabel -Name $Name))
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.BackColor = $script:Colors.Surface
+    $dialog.ClientSize = New-Object System.Drawing.Size(480, 312)
+    $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = ('{0}消息' -f (Get-DailyReminderLabel -Name $Name))
+    $title.AutoSize = $true
+    $title.Location = New-Object System.Drawing.Point(24, 22)
+    $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($title)
+
+    $modeLabel = New-Object System.Windows.Forms.Label
+    $modeLabel.Text = '消息模式'
+    $modeLabel.AutoSize = $true
+    $modeLabel.Location = New-Object System.Drawing.Point(26, 68)
+    $modeLabel.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($modeLabel)
+
+    $modeBox = New-Object System.Windows.Forms.ComboBox
+    $modeBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $modeBox.Location = New-Object System.Drawing.Point(108, 64)
+    $modeBox.Size = New-Object System.Drawing.Size(150, 30)
+    [void]$modeBox.Items.Add('默认消息')
+    [void]$modeBox.Items.Add('自定义消息')
+    [void]$modeBox.Items.Add('随机消息')
+    $mode = if ($item.PSObject.Properties.Name -contains 'MessageMode') { [string]$item.MessageMode } else { 'Default' }
+    $modeBox.SelectedIndex = switch ($mode) {
+        'Custom' { 1 }
+        'Random' { 2 }
+        default { 0 }
+    }
+    $dialog.Controls.Add($modeBox)
+
+    $summaryLabel = New-Object System.Windows.Forms.Label
+    $summaryLabel.AutoSize = $false
+    $summaryLabel.Location = New-Object System.Drawing.Point(276, 67)
+    $summaryLabel.Size = New-Object System.Drawing.Size(180, 24)
+    $summaryLabel.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($summaryLabel)
+
+    $customLabel = New-Object System.Windows.Forms.Label
+    $customLabel.Text = '自定义内容'
+    $customLabel.AutoSize = $true
+    $customLabel.Location = New-Object System.Drawing.Point(26, 108)
+    $customLabel.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($customLabel)
+
+    $customBox = New-Object System.Windows.Forms.TextBox
+    $customBox.Location = New-Object System.Drawing.Point(108, 104)
+    $customBox.Size = New-Object System.Drawing.Size(348, 26)
+    $customBox.Multiline = $true
+    $customBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $customBox.Text = if ($item.PSObject.Properties.Name -contains 'CustomMessage') { [string]$item.CustomMessage } else { '' }
+    $customBox.Height = 88
+    $dialog.Controls.Add($customBox)
+
+    $previewLabel = New-Object System.Windows.Forms.Label
+    $previewLabel.AutoSize = $false
+    $previewLabel.Location = New-Object System.Drawing.Point(26, 204)
+    $previewLabel.Size = New-Object System.Drawing.Size(430, 48)
+    $previewLabel.ForeColor = $script:Colors.Blue
+    $dialog.Controls.Add($previewLabel)
+
+    $error = New-Object System.Windows.Forms.Label
+    $error.AutoSize = $false
+    $error.Location = New-Object System.Drawing.Point(26, 258)
+    $error.Size = New-Object System.Drawing.Size(428, 22)
+    $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
+    $dialog.Controls.Add($error)
+
+    $saveBtn = New-Object System.Windows.Forms.Button
+    $saveBtn.Text = '保存'
+    $saveBtn.Size = New-Object System.Drawing.Size(92, 34)
+    $saveBtn.Location = New-Object System.Drawing.Point(252, 276)
+    $saveBtn.BackColor = $script:Colors.Blue
+    $saveBtn.ForeColor = [System.Drawing.Color]::White
+    $saveBtn.FlatStyle = 'Flat'
+    $saveBtn.FlatAppearance.BorderSize = 0
+    $dialog.Controls.Add($saveBtn)
+
+    $cancelBtn = New-Object System.Windows.Forms.Button
+    $cancelBtn.Text = '取消'
+    $cancelBtn.Size = New-Object System.Drawing.Size(92, 34)
+    $cancelBtn.Location = New-Object System.Drawing.Point(352, 276)
+    $cancelBtn.BackColor = $script:Colors.Surface
+    $cancelBtn.ForeColor = $script:Colors.Text
+    $cancelBtn.FlatStyle = 'Flat'
+    $cancelBtn.FlatAppearance.BorderColor = $script:Colors.Border
+    $cancelBtn.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($cancelBtn)
+
+    $updatePreview = {
+        $selectedMode = switch ($modeBox.SelectedIndex) {
+            1 { 'Custom' }
+            2 { 'Random' }
+            default { 'Default' }
+        }
+        $customBox.Enabled = ($selectedMode -eq 'Custom')
+        $customLabel.ForeColor = if ($customBox.Enabled) { $script:Colors.Text } else { $script:Colors.Muted }
+        $tempSummaryItem = [pscustomobject]@{
+            MessageMode = $selectedMode
+            CustomMessage = $customBox.Text
+        }
+        $summaryLabel.Text = '当前选择：' + (Get-DailyReminderMessageSummary -Item $tempSummaryItem)
+        $previewText = Get-DailyReminderMessage -Name $Name -TimeText ([string]$item.Time) -MessageMode $selectedMode -CustomMessage $customBox.Text
+        $previewLabel.Text = ('预览：{0}' -f $previewText)
+    }
+
+    $modeBox.Add_SelectedIndexChanged({ & $updatePreview })
+    $customBox.Add_TextChanged({ & $updatePreview })
+
+    $saveBtn.Add_Click({
+        param($sender, $e)
+
+        $selectedMode = switch ($modeBox.SelectedIndex) {
+            1 { 'Custom' }
+            2 { 'Random' }
+            default { 'Default' }
+        }
+        $customText = $customBox.Text.Trim()
+        if ($selectedMode -eq 'Custom' -and [string]::IsNullOrWhiteSpace($customText)) {
+            $error.Text = '自定义消息不能为空。'
+            return
+        }
+
+        $item.MessageMode = $selectedMode
+        $item.CustomMessage = if ($selectedMode -eq 'Custom') { $customText } else { '' }
+        $item.Message = Get-DailyReminderMessage -Name $Name -TimeText ([string]$item.Time) -MessageMode $selectedMode -CustomMessage $item.CustomMessage
+        Save-Config
+        Update-MainStatus
+        Update-DailyReminderRows
+        Write-AppLog -Event 'DailyReminderMessageSaved' -Message ('{0} 消息模式={1}' -f (Get-DailyReminderLabel -Name $Name), $selectedMode)
+        Show-Toast -Message ('{0}消息已保存' -f (Get-DailyReminderLabel -Name $Name)) -Accent $script:Colors.Green
+        $dialog.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $dialog.Close()
+    })
+
+    $cancelBtn.Add_Click({
+        param($sender, $e)
+        $dialog.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $dialog.Close()
+    })
+
+    $dialog.Add_Shown({
+        param($sender, $e)
+        Enable-WindowGlass -Form $sender
+        Start-FormFadeIn -Form $sender -TargetOpacity 0.98
+        & $updatePreview
+    })
+
+    [void]$dialog.ShowDialog($OwnerForm)
 }
 
 function Get-NextDailyText {
@@ -2107,6 +2976,7 @@ function Get-DailyReminderStateText {
     param([string]$Name)
 
     $item = $script:Config.DailyReminders.$Name
+    $todayText = (Get-Date).ToString('yyyy-MM-dd')
     if ($script:Config.Mode -eq 'Trip') {
         if ($item.Enabled) {
             return '出差中，暂不提醒'
@@ -2122,11 +2992,40 @@ function Get-DailyReminderStateText {
         return ('贪睡中，{0:HH:mm} 再提醒' -f (Get-SnoozeUntil))
     }
 
-    if ($item.LastFiredDate -eq (Get-Date).ToString('yyyy-MM-dd')) {
+    if ($item.LastFiredDate -eq $todayText) {
         return '今日已提醒'
     }
 
+    try {
+        if ([datetime]::Now -ge (Get-ScheduledDateTime -TimeText $item.Time)) {
+            return '今日已过时间'
+        }
+    }
+    catch {
+    }
+
     return '提醒已开启'
+}
+
+function Test-DailyReminderToggleVisible {
+    param([string]$Name)
+
+    $item = $script:Config.DailyReminders.$Name
+    $todayText = (Get-Date).ToString('yyyy-MM-dd')
+    if ($item.LastFiredDate -eq $todayText) {
+        return $false
+    }
+
+    try {
+        if ([datetime]::Now -ge (Get-ScheduledDateTime -TimeText $item.Time)) {
+            return $false
+        }
+    }
+    catch {
+        return $true
+    }
+
+    return $true
 }
 
 function Update-DailyReminderRows {
@@ -2142,12 +3041,17 @@ function Update-DailyReminderRows {
         $row = $script:DailyReminderRows[$name]
         $item = $script:Config.DailyReminders.$name
         $isEnabled = [bool]$item.Enabled
+        $toggleVisible = Test-DailyReminderToggleVisible -Name $name
         $row.TimeLabel.Text = ('{0}  {1}' -f (Get-DailyReminderLabel -Name $name), $item.Time)
         $row.StateLabel.Text = Get-DailyReminderStateText -Name $name
         $row.ToggleButton.Text = if ($isEnabled) { '屏蔽' } else { '开启' }
+        $row.ToggleButton.Visible = $toggleVisible
 
         if ($script:Config.Mode -eq 'Trip' -or ((Test-SnoozeActive) -and $script:Config.SnoozeReminder.KeyName -eq $name)) {
             $row.StateLabel.ForeColor = $script:Colors.Orange
+        }
+        elseif (-not $toggleVisible -and $isEnabled) {
+            $row.StateLabel.ForeColor = $script:Colors.Muted
         }
         elseif ($isEnabled) {
             $row.StateLabel.ForeColor = $script:Colors.Green
@@ -2181,6 +3085,12 @@ function Update-DailyReminderRows {
 function Toggle-DailyReminderBlock {
     param([string]$Name)
 
+    if (-not (Test-DailyReminderToggleVisible -Name $Name)) {
+        Show-Toast -Message ('{0}已经过了今天的操作时间' -f (Get-DailyReminderLabel -Name $Name)) -Accent $script:Colors.Muted
+        Update-DailyReminderRows
+        return
+    }
+
     $item = $script:Config.DailyReminders.$Name
     $item.Enabled = -not [bool]$item.Enabled
     Save-Config
@@ -2202,17 +3112,28 @@ function Get-CustomReminderList {
 
 function New-CustomReminder {
     param(
+        [string]$At = $null,
         [string]$TimeText = '09:00',
         [string]$Title = '自定义提醒',
         [string]$Message = '你设置的自定义提醒时间到了。',
         [bool]$Enabled = $true,
         [bool]$Strong = $false,
-        [bool]$Sound = $true
+        [bool]$Sound = $false
     )
+
+    $atText = $null
+    if (-not [string]::IsNullOrWhiteSpace($At)) {
+        $atValue = Ensure-DateTime $At
+        if ($null -ne $atValue) {
+            $atText = $atValue.ToString('o')
+            $TimeText = $atValue.ToString('HH:mm')
+        }
+    }
 
     return [pscustomobject]@{
         Id = [guid]::NewGuid().ToString('N')
         Enabled = $Enabled
+        At = $atText
         Time = $TimeText
         Title = $Title
         Message = $Message
@@ -2220,6 +3141,50 @@ function New-CustomReminder {
         Strong = $Strong
         Sound = $Sound
     }
+}
+
+function Get-CustomReminderAtDateTime {
+    param([object]$Item)
+
+    if ($null -eq $Item) {
+        return $null
+    }
+
+    if ($Item.PSObject.Properties.Name -contains 'At' -and -not [string]::IsNullOrWhiteSpace([string]$Item.At)) {
+        return Ensure-DateTime $Item.At
+    }
+
+    return $null
+}
+
+function Get-CustomReminderDueAt {
+    param([object]$Item)
+
+    $at = Get-CustomReminderAtDateTime -Item $Item
+    if ($null -ne $at) {
+        return $at
+    }
+
+    if ($null -eq $Item -or -not ($Item.PSObject.Properties.Name -contains 'Time')) {
+        return $null
+    }
+
+    try {
+        return Get-ScheduledDateTime -TimeText ([string]$Item.Time)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Format-CustomReminderAtText {
+    param([datetime]$At)
+
+    if ($At.Date -eq [datetime]::Today.Date) {
+        return ('今天 {0}' -f $At.ToString('HH:mm'))
+    }
+
+    return $At.ToString('yyyy-MM-dd HH:mm')
 }
 
 function Get-CustomReminderDisplayText {
@@ -2242,7 +3207,18 @@ function Get-CustomReminderDisplayText {
         '待提醒'
     }
 
-    return ('{0}  {1}  [{2}]' -f $Item.Time, $Item.Title, $state)
+    $dueAt = Get-CustomReminderDueAt -Item $Item
+    $timeText = if ($null -ne $dueAt -and (Get-CustomReminderAtDateTime -Item $Item)) {
+        Format-CustomReminderAtText -At $dueAt
+    }
+    elseif ($Item.PSObject.Properties.Name -contains 'Time') {
+        [string]$Item.Time
+    }
+    else {
+        ''
+    }
+
+    return ('{0}  {1}  [{2}]' -f $timeText, $Item.Title, $state)
 }
 
 function Get-NextCustomText {
@@ -2252,7 +3228,28 @@ function Get-NextCustomText {
     }
 
     $enabledCount = @($items).Count
-    $nextItems = @($items | Sort-Object Time | Select-Object -First 2 | ForEach-Object { '{0} {1}' -f $_.Time, $_.Title })
+    $nextItems = @(
+        $items |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Item = $_
+                    DueAt = Get-CustomReminderDueAt -Item $_
+                    HasAt = [bool](Get-CustomReminderAtDateTime -Item $_)
+                }
+            } |
+            Where-Object { $null -ne $_.DueAt } |
+            Sort-Object DueAt |
+            Select-Object -First 2 |
+            ForEach-Object {
+                $displayTime = if ($_.HasAt) {
+                    Format-CustomReminderAtText -At $_.DueAt
+                }
+                else {
+                    [string]$_.Item.Time
+                }
+                '{0} {1}' -f $displayTime, $_.Item.Title
+            }
+    )
     return ('自定义：{0}个开启，最近 {1}' -f $enabledCount, ($nextItems -join '、'))
 }
 
@@ -2263,13 +3260,25 @@ function Get-MealStats {
         ThisWeekLunchCount = 0
         ThisWeekDinnerCount = 0
         ThisWeekDelayedCount = 0
+        ThisWeekSnoozeCount = 0
         ThisWeekNotOnTimeCount = 0
+        WeekStart = $null
+        WeekEnd = $null
+        WorkScheduleText = ''
+        OnTimeRate = 0
+        DayRows = @()
+        OnTimeDates = @()
+        NotOnTimeDates = @()
+        DelayedDates = @()
         DisplayString = ''
     }
 
     $today = [datetime]::Today
     $monday = Get-WeekMonday -Date $today
     $sunday = $monday.AddDays(6)
+    $empty.WeekStart = $monday
+    $empty.WeekEnd = $sunday
+    $empty.WorkScheduleText = Get-WorkScheduleText
 
     $workDates = New-Object 'System.Collections.Generic.HashSet[string]'
     $cursor = $monday
@@ -2280,13 +3289,13 @@ function Get-MealStats {
         $cursor = $cursor.AddDays(1)
     }
 
-    if (-not (Test-Path -LiteralPath $script:LogPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $script:StatsPath -PathType Leaf)) {
         $empty.ThisWeekTotal = $workDates.Count
         return $empty
     }
 
     try {
-        $logText = Read-Utf8Text -Path $script:LogPath
+        $logText = Read-Utf8Text -Path $script:StatsPath
     }
     catch {
         $empty.ThisWeekTotal = $workDates.Count
@@ -2302,6 +3311,7 @@ function Get-MealStats {
     $dinnerDates = New-Object 'System.Collections.Generic.HashSet[string]'
     $delayedDates = New-Object 'System.Collections.Generic.HashSet[string]'
     $recordDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    $snoozeCount = 0
     $dailyPattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+DailyFired\s+-\s+(午饭|晚饭)\s+'
     $snoozePattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+SnoozeSet\s+-\s+.*(午饭|晚饭)'
 
@@ -2340,6 +3350,7 @@ function Get-MealStats {
 
             [void]$recordDates.Add($Matches[1])
             [void]$delayedDates.Add($Matches[1])
+            $snoozeCount++
         }
     }
 
@@ -2366,7 +3377,53 @@ function Get-MealStats {
         }
     }
 
+    $notOnTimeDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($dateText in $eligibleDates) {
+        if (-not $onTimeDates.Contains($dateText)) {
+            [void]$notOnTimeDates.Add($dateText)
+        }
+    }
+
+    $dayRows = @()
+    foreach ($dateText in @($workDates | Sort-Object)) {
+        try {
+            $dateValue = [datetime]::ParseExact($dateText, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        catch {
+            continue
+        }
+
+        $hasLunch = $lunchDates.Contains($dateText)
+        $hasDinner = $dinnerDates.Contains($dateText)
+        $hasDelay = $delayedDates.Contains($dateText)
+        $isEligible = $eligibleDates.Contains($dateText)
+        $status = if (-not $isEligible) {
+            '今日未记录'
+        }
+        elseif ($onTimeDates.Contains($dateText)) {
+            '准点'
+        }
+        elseif ($hasDelay) {
+            '不准点（推延）'
+        }
+        else {
+            '不准点'
+        }
+
+        $dayRows += [pscustomobject]@{
+            Date = $dateValue
+            DateText = $dateText
+            Weekday = $dateValue.ToString('dddd')
+            Lunch = $hasLunch
+            Dinner = $hasDinner
+            Delayed = $hasDelay
+            Eligible = $isEligible
+            Status = $status
+        }
+    }
+
     $notOnTimeCount = [Math]::Max(0, $eligibleDates.Count - $onTimeDates.Count)
+    $onTimeRate = if ($eligibleDates.Count -gt 0) { [Math]::Round(($onTimeDates.Count * 100.0) / $eligibleDates.Count, 1) } else { 0 }
     $display = ''
     if ($eligibleDates.Count -gt 0) {
         $display = ('本周准点吃饭 {0}/{1} 天，不准点 {2} 天' -f $onTimeDates.Count, $eligibleDates.Count, $notOnTimeCount)
@@ -2378,7 +3435,16 @@ function Get-MealStats {
         ThisWeekLunchCount = $lunchDates.Count
         ThisWeekDinnerCount = $dinnerDates.Count
         ThisWeekDelayedCount = $delayedDates.Count
+        ThisWeekSnoozeCount = $snoozeCount
         ThisWeekNotOnTimeCount = $notOnTimeCount
+        WeekStart = $monday
+        WeekEnd = $sunday
+        WorkScheduleText = Get-WorkScheduleText
+        OnTimeRate = $onTimeRate
+        DayRows = $dayRows
+        OnTimeDates = @($onTimeDates | Sort-Object)
+        NotOnTimeDates = @($notOnTimeDates | Sort-Object)
+        DelayedDates = @($delayedDates | Sort-Object)
         DisplayString = $display
     }
 }
@@ -2400,6 +3466,159 @@ function Update-TrayStats {
         $text = $text.Substring(0, 63)
     }
     $script:TrayIcon.Text = $text
+}
+
+function Show-MealStatsDialog {
+    param([System.Windows.Forms.Form]$OwnerForm)
+
+    $stats = Get-MealStats
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = '本周统计'
+    Set-FormThemeIdentity -Form $dialog -Suffix '本周统计'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.TopMost = $true
+    $dialog.BackColor = $script:Colors.Surface
+    $dialog.ClientSize = New-Object System.Drawing.Size(620, 500)
+    $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = '本周吃饭统计'
+    $title.AutoSize = $true
+    $title.Location = New-Object System.Drawing.Point(24, 24)
+    $title.Font = New-Object System.Drawing.Font('Segoe UI', 17, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($title)
+
+    $scope = New-Object System.Windows.Forms.Label
+    $scope.AutoSize = $false
+    $scope.Location = New-Object System.Drawing.Point(26, 60)
+    $scope.Size = New-Object System.Drawing.Size(560, 24)
+    $scope.ForeColor = $script:Colors.Muted
+    $scope.Text = ('{0:yyyy-MM-dd} 到 {1:yyyy-MM-dd} | {2}' -f $stats.WeekStart, $stats.WeekEnd, $stats.WorkScheduleText)
+    $dialog.Controls.Add($scope)
+
+    $addMetric = {
+        param(
+            [string]$Caption,
+            [string]$Value,
+            [int]$Left,
+            [int]$Top,
+            [System.Drawing.Color]$Accent
+        )
+
+        $panel = New-Object System.Windows.Forms.Panel
+        $panel.Location = New-Object System.Drawing.Point($Left, $Top)
+        $panel.Size = New-Object System.Drawing.Size(132, 74)
+        $panel.BackColor = Blend-Color -From $script:Colors.Surface -To $script:Colors.Background -Amount 0.25
+        $panel.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $dialog.Controls.Add($panel)
+
+        $valueLabel = New-Object System.Windows.Forms.Label
+        $valueLabel.AutoSize = $false
+        $valueLabel.Location = New-Object System.Drawing.Point(10, 10)
+        $valueLabel.Size = New-Object System.Drawing.Size(110, 30)
+        $valueLabel.Text = $Value
+        $valueLabel.ForeColor = $Accent
+        $valueLabel.Font = New-Object System.Drawing.Font('Segoe UI', 15, [System.Drawing.FontStyle]::Bold)
+        $panel.Controls.Add($valueLabel)
+
+        $captionLabel = New-Object System.Windows.Forms.Label
+        $captionLabel.AutoSize = $false
+        $captionLabel.Location = New-Object System.Drawing.Point(10, 44)
+        $captionLabel.Size = New-Object System.Drawing.Size(110, 20)
+        $captionLabel.Text = $Caption
+        $captionLabel.ForeColor = $script:Colors.Muted
+        $captionLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
+        $panel.Controls.Add($captionLabel)
+    }
+
+    & $addMetric -Caption '准点天数' -Value ('{0}/{1}' -f $stats.ThisWeekOnTimeCount, $stats.ThisWeekTotal) -Left 28 -Top 100 -Accent $script:Colors.Green
+    & $addMetric -Caption '不准点天数' -Value ([string]$stats.ThisWeekNotOnTimeCount) -Left 174 -Top 100 -Accent $script:Colors.Orange
+    & $addMetric -Caption '推延次数' -Value ([string]$stats.ThisWeekSnoozeCount) -Left 320 -Top 100 -Accent $script:Colors.Purple
+    & $addMetric -Caption '准点率' -Value ('{0}%' -f $stats.OnTimeRate) -Left 466 -Top 100 -Accent $script:Colors.Blue
+
+    $mealSummary = New-Object System.Windows.Forms.Label
+    $mealSummary.AutoSize = $false
+    $mealSummary.Location = New-Object System.Drawing.Point(28, 190)
+    $mealSummary.Size = New-Object System.Drawing.Size(560, 26)
+    $mealSummary.ForeColor = $script:Colors.Text
+    $mealSummary.Text = ('午饭记录 {0} 次 | 晚饭记录 {1} 次 | 推延日期 {2} 天' -f $stats.ThisWeekLunchCount, $stats.ThisWeekDinnerCount, $stats.ThisWeekDelayedCount)
+    $dialog.Controls.Add($mealSummary)
+
+    $list = New-Object System.Windows.Forms.ListView
+    $list.Location = New-Object System.Drawing.Point(28, 226)
+    $list.Size = New-Object System.Drawing.Size(560, 200)
+    $list.View = [System.Windows.Forms.View]::Details
+    $list.FullRowSelect = $true
+    $list.GridLines = $false
+    $list.HideSelection = $false
+    $list.BackColor = $script:Colors.Surface
+    $list.ForeColor = $script:Colors.Text
+    $list.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    [void]$list.Columns.Add('日期', 105)
+    [void]$list.Columns.Add('星期', 95)
+    [void]$list.Columns.Add('午饭', 70)
+    [void]$list.Columns.Add('晚饭', 70)
+    [void]$list.Columns.Add('推延', 70)
+    [void]$list.Columns.Add('状态', 130)
+    foreach ($row in @($stats.DayRows)) {
+        $item = New-Object System.Windows.Forms.ListViewItem($row.DateText)
+        [void]$item.SubItems.Add($row.Weekday)
+        $lunchText = if ($row.Lunch) { '已记' } else { '-' }
+        $dinnerText = if ($row.Dinner) { '已记' } else { '-' }
+        $delayedText = if ($row.Delayed) { '有' } else { '-' }
+        [void]$item.SubItems.Add($lunchText)
+        [void]$item.SubItems.Add($dinnerText)
+        [void]$item.SubItems.Add($delayedText)
+        [void]$item.SubItems.Add($row.Status)
+        if ($row.Status -eq '准点') {
+            $item.ForeColor = $script:Colors.Green
+        }
+        elseif ($row.Status -like '不准点*') {
+            $item.ForeColor = $script:Colors.Orange
+        }
+        else {
+            $item.ForeColor = $script:Colors.Muted
+        }
+        [void]$list.Items.Add($item)
+    }
+    $dialog.Controls.Add($list)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.AutoSize = $false
+    $hint.Location = New-Object System.Drawing.Point(28, 438)
+    $hint.Size = New-Object System.Drawing.Size(410, 38)
+    $hint.ForeColor = $script:Colors.Muted
+    $hint.Text = '口径：本周已到统计范围的工作日内，饭点触发且未点推延算准点；点推延算不准点。'
+    $dialog.Controls.Add($hint)
+
+    $closeBtn = New-Object System.Windows.Forms.Button
+    $closeBtn.Text = '关闭'
+    $closeBtn.Size = New-Object System.Drawing.Size(100, 36)
+    $closeBtn.Location = New-Object System.Drawing.Point(488, 448)
+    $closeBtn.BackColor = $script:Colors.Surface
+    $closeBtn.ForeColor = $script:Colors.Text
+    $closeBtn.FlatStyle = 'Flat'
+    $closeBtn.FlatAppearance.BorderColor = $script:Colors.Border
+    $closeBtn.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($closeBtn)
+    $closeBtn.Add_Click({
+        param($sender, $e)
+        $sender.FindForm().Close()
+    })
+
+    $dialog.Add_Shown({
+        param($sender, $e)
+        Enable-WindowGlass -Form $sender
+        Apply-AppButtonChrome -Root $sender
+        Start-FormFadeIn -Form $sender -TargetOpacity 0.98
+    })
+
+    [void]$dialog.ShowDialog($OwnerForm)
 }
 
 function Get-FocusDoNotDisturb {
@@ -2933,7 +4152,7 @@ function Show-CustomRemindersDialog {
     $dialog.FormBorderStyle = 'FixedDialog'
     $dialog.MaximizeBox = $false
     $dialog.MinimizeBox = $false
-    $dialog.ClientSize = New-Object System.Drawing.Size(680, 520)
+    $dialog.ClientSize = New-Object System.Drawing.Size(680, 560)
     $dialog.BackColor = $script:Colors.Background
     $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
     $dialog.Opacity = 0
@@ -2964,7 +4183,7 @@ function Show-CustomRemindersDialog {
 
     $sound = New-Object System.Windows.Forms.CheckBox
     $sound.Text = '播放声音'
-    $sound.Checked = $true
+    $sound.Checked = $false
     $sound.Location = New-Object System.Drawing.Point(438, 58)
     $sound.Size = New-Object System.Drawing.Size(104, 24)
     $sound.ForeColor = $script:Colors.Text
@@ -2978,38 +4197,46 @@ function Show-CustomRemindersDialog {
     $strong.ForeColor = $script:Colors.Text
     $dialog.Controls.Add($strong)
 
+    $dateLabel = New-Object System.Windows.Forms.Label
+    $dateLabel.Text = '日期'
+    $dateLabel.AutoSize = $true
+    $dateLabel.Location = New-Object System.Drawing.Point(346, 100)
+    $dateLabel.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($dateLabel)
+
+    $dateBox = New-Object System.Windows.Forms.DateTimePicker
+    $dateBox.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
+    $dateBox.CustomFormat = 'yyyy-MM-dd'
+    $dateBox.Value = [datetime]::Today
+    $dateBox.Location = New-Object System.Drawing.Point(346, 126)
+    $dateBox.Size = New-Object System.Drawing.Size(140, 26)
+    $dialog.Controls.Add($dateBox)
+
     $timeLabel = New-Object System.Windows.Forms.Label
     $timeLabel.Text = '时间'
     $timeLabel.AutoSize = $true
-    $timeLabel.Location = New-Object System.Drawing.Point(346, 100)
+    $timeLabel.Location = New-Object System.Drawing.Point(500, 100)
     $timeLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($timeLabel)
 
-    $hour = New-Object System.Windows.Forms.NumericUpDown
-    $hour.Minimum = 0
-    $hour.Maximum = 23
-    $hour.Value = 9
-    $hour.Location = New-Object System.Drawing.Point(346, 126)
-    $hour.Size = New-Object System.Drawing.Size(70, 26)
-    $dialog.Controls.Add($hour)
-
-    $minute = New-Object System.Windows.Forms.NumericUpDown
-    $minute.Minimum = 0
-    $minute.Maximum = 59
-    $minute.Value = 0
-    $minute.Location = New-Object System.Drawing.Point(426, 126)
-    $minute.Size = New-Object System.Drawing.Size(70, 26)
-    $dialog.Controls.Add($minute)
+    $timeBox = New-Object System.Windows.Forms.DateTimePicker
+    $timeBox.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
+    $timeBox.CustomFormat = 'HH:mm'
+    $timeBox.ShowUpDown = $true
+    $timeBox.Value = [datetime]::Today.AddHours(9)
+    $timeBox.Location = New-Object System.Drawing.Point(500, 126)
+    $timeBox.Size = New-Object System.Drawing.Size(144, 26)
+    $dialog.Controls.Add($timeBox)
 
     $nameLabel = New-Object System.Windows.Forms.Label
     $nameLabel.Text = '标题'
     $nameLabel.AutoSize = $true
-    $nameLabel.Location = New-Object System.Drawing.Point(346, 174)
+    $nameLabel.Location = New-Object System.Drawing.Point(346, 176)
     $nameLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($nameLabel)
 
     $nameBox = New-Object System.Windows.Forms.TextBox
-    $nameBox.Location = New-Object System.Drawing.Point(346, 200)
+    $nameBox.Location = New-Object System.Drawing.Point(346, 202)
     $nameBox.Size = New-Object System.Drawing.Size(298, 26)
     $nameBox.Text = '自定义提醒'
     $dialog.Controls.Add($nameBox)
@@ -3017,12 +4244,12 @@ function Show-CustomRemindersDialog {
     $messageLabel = New-Object System.Windows.Forms.Label
     $messageLabel.Text = '提醒内容'
     $messageLabel.AutoSize = $true
-    $messageLabel.Location = New-Object System.Drawing.Point(346, 246)
+    $messageLabel.Location = New-Object System.Drawing.Point(346, 248)
     $messageLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($messageLabel)
 
     $messageBox = New-Object System.Windows.Forms.TextBox
-    $messageBox.Location = New-Object System.Drawing.Point(346, 272)
+    $messageBox.Location = New-Object System.Drawing.Point(346, 274)
     $messageBox.Size = New-Object System.Drawing.Size(298, 92)
     $messageBox.Multiline = $true
     $messageBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
@@ -3032,7 +4259,7 @@ function Show-CustomRemindersDialog {
     $error = New-Object System.Windows.Forms.Label
     $error.AutoSize = $false
     $error.Text = ''
-    $error.Location = New-Object System.Drawing.Point(24, 420)
+    $error.Location = New-Object System.Drawing.Point(24, 454)
     $error.Size = New-Object System.Drawing.Size(620, 22)
     $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
     $dialog.Controls.Add($error)
@@ -3040,7 +4267,7 @@ function Show-CustomRemindersDialog {
     $newBtn = New-Object System.Windows.Forms.Button
     $newBtn.Text = '新增'
     $newBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $newBtn.Location = New-Object System.Drawing.Point(24, 456)
+    $newBtn.Location = New-Object System.Drawing.Point(24, 490)
     $newBtn.BackColor = $script:Colors.Green
     $newBtn.ForeColor = [System.Drawing.Color]::White
     $newBtn.FlatStyle = 'Flat'
@@ -3050,7 +4277,7 @@ function Show-CustomRemindersDialog {
     $saveBtn = New-Object System.Windows.Forms.Button
     $saveBtn.Text = '保存'
     $saveBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $saveBtn.Location = New-Object System.Drawing.Point(446, 456)
+    $saveBtn.Location = New-Object System.Drawing.Point(446, 490)
     $saveBtn.BackColor = $script:Colors.Blue
     $saveBtn.ForeColor = [System.Drawing.Color]::White
     $saveBtn.FlatStyle = 'Flat'
@@ -3060,7 +4287,7 @@ function Show-CustomRemindersDialog {
     $deleteBtn = New-Object System.Windows.Forms.Button
     $deleteBtn.Text = '删除'
     $deleteBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $deleteBtn.Location = New-Object System.Drawing.Point(124, 456)
+    $deleteBtn.Location = New-Object System.Drawing.Point(124, 490)
     $deleteBtn.BackColor = $script:Colors.OrangeSoft
     $deleteBtn.ForeColor = $script:Colors.Orange
     $deleteBtn.FlatStyle = 'Flat'
@@ -3071,7 +4298,7 @@ function Show-CustomRemindersDialog {
     $closeBtn = New-Object System.Windows.Forms.Button
     $closeBtn.Text = '关闭'
     $closeBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $closeBtn.Location = New-Object System.Drawing.Point(552, 456)
+    $closeBtn.Location = New-Object System.Drawing.Point(552, 490)
     $closeBtn.BackColor = $script:Colors.Surface
     $closeBtn.ForeColor = $script:Colors.Text
     $closeBtn.FlatStyle = 'Flat'
@@ -3109,9 +4336,16 @@ function Show-CustomRemindersDialog {
         }
 
         $item = @($items)[$list.SelectedIndex]
-        $parts = Get-DailyReminderTimeParts -TimeText $item.Time -DefaultHour 9 -DefaultMinute 0
-        $hour.Value = $parts.Hour
-        $minute.Value = $parts.Minute
+        $dueAt = Get-CustomReminderDueAt -Item $item
+        if ($null -ne $dueAt) {
+            $dateBox.Value = $dueAt.Date
+            $timeBox.Value = [datetime]::Today.Add($dueAt.TimeOfDay)
+        }
+        else {
+            $dateBox.Value = [datetime]::Today
+            $parts = Get-DailyReminderTimeParts -TimeText $item.Time -DefaultHour 9 -DefaultMinute 0
+            $timeBox.Value = [datetime]::Today.AddHours([double]$parts.Hour).AddMinutes([double]$parts.Minute)
+        }
         $nameBox.Text = [string]$item.Title
         $messageBox.Text = [string]$item.Message
         $enabled.Checked = [bool]$item.Enabled
@@ -3124,12 +4358,12 @@ function Show-CustomRemindersDialog {
 
     $newBtn.Add_Click({
         $list.ClearSelected()
-        $hour.Value = 9
-        $minute.Value = 0
+        $dateBox.Value = [datetime]::Today
+        $timeBox.Value = [datetime]::Today.AddHours(9)
         $nameBox.Text = '自定义提醒'
         $messageBox.Text = '你设置的自定义提醒时间到了。'
         $enabled.Checked = $true
-        $sound.Checked = $true
+        $sound.Checked = $false
         $strong.Checked = $false
         $error.Text = ''
         $nameBox.Focus()
@@ -3147,12 +4381,15 @@ function Show-CustomRemindersDialog {
             $messageText = '你设置的自定义提醒时间到了。'
         }
 
-        $timeText = Format-ReminderTime -Hour ([int]$hour.Value) -Minute ([int]$minute.Value)
+        $scheduledAt = $dateBox.Value.Date.Add($timeBox.Value.TimeOfDay)
+        $timeText = $scheduledAt.ToString('HH:mm')
+        $atText = $scheduledAt.ToString('o')
         $items = Get-CustomReminderList
         if ($list.SelectedIndex -ge 0 -and $list.SelectedIndex -lt @($items).Count) {
             $item = @($items)[$list.SelectedIndex]
-            $changed = ([string]$item.Time -ne $timeText) -or ([string]$item.Title -ne $titleText)
+            $changed = ([string]$item.At -ne $atText) -or ([string]$item.Time -ne $timeText) -or ([string]$item.Title -ne $titleText)
             $item.Enabled = [bool]$enabled.Checked
+            $item.At = $atText
             $item.Time = $timeText
             $item.Title = $titleText
             $item.Message = $messageText
@@ -3164,7 +4401,7 @@ function Show-CustomRemindersDialog {
             $script:Config.CustomReminders = @($items)
         }
         else {
-            $newItem = New-CustomReminder -TimeText $timeText -Title $titleText -Message $messageText -Enabled ([bool]$enabled.Checked) -Strong ([bool]$strong.Checked) -Sound ([bool]$sound.Checked)
+            $newItem = New-CustomReminder -At $atText -TimeText $timeText -Title $titleText -Message $messageText -Enabled ([bool]$enabled.Checked) -Strong ([bool]$strong.Checked) -Sound ([bool]$sound.Checked)
             $script:Config.CustomReminders = @($items) + $newItem
         }
 
@@ -3294,7 +4531,7 @@ function Update-MainStatus {
 
     if ($script:TrayIcon) {
         $script:TrayIcon.Text = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme
-        $script:TrayIcon.Icon = Get-ThemeIcon -Theme $script:Config.Preferences.Theme
+        $script:TrayIcon.Icon = Get-AppIcon
     }
 
     if ($script:TrayPauseTodayItem) {
@@ -3596,7 +4833,7 @@ function Show-SettingsDialog {
     $dialog.ShowInTaskbar = $false
     $dialog.TopMost = $true
     $dialog.BackColor = $script:Colors.Surface
-    $dialog.ClientSize = New-Object System.Drawing.Size(500, 510)
+    $dialog.ClientSize = New-Object System.Drawing.Size(580, 570)
     $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 
     $header = New-Object System.Windows.Forms.Panel
@@ -3645,12 +4882,13 @@ function Show-SettingsDialog {
     [void]$themeBox.Items.Add('深色模式')
     [void]$themeBox.Items.Add('库洛米主题')
     [void]$themeBox.Items.Add('皮卡丘主题')
+    [void]$themeBox.Items.Add('线条小狗主题')
     [void]$themeBox.Items.Add('猪猪侠主题')
     $themeBox.SelectedIndex = Get-ThemeIndex -Value $script:Config.Preferences.Theme
     $dialog.Controls.Add($themeBox)
 
     $themePreview = New-Object System.Windows.Forms.PictureBox
-    $themePreview.Location = New-Object System.Drawing.Point(310, 124)
+    $themePreview.Location = New-Object System.Drawing.Point(292, 124)
     $themePreview.Size = New-Object System.Drawing.Size(54, 54)
     $themePreview.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
     $themePreview.BackColor = Get-ThemeImageBackColor -Theme $script:Config.Preferences.Theme
@@ -3673,12 +4911,145 @@ function Show-SettingsDialog {
     & $updateThemePreview
     $themeBox.Add_SelectedIndexChanged({
         & $updateThemePreview
+        if ($iconBox.SelectedIndex -eq 0) {
+            & $updateIconPreview
+        }
     })
+
+    $iconLabel = New-Object System.Windows.Forms.Label
+    $iconLabel.Text = '软件图标'
+    $iconLabel.AutoSize = $true
+    $iconLabel.Location = New-Object System.Drawing.Point(28, 184)
+    $iconLabel.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($iconLabel)
+
+    $iconBox = New-Object System.Windows.Forms.ComboBox
+    $iconBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $iconBox.Location = New-Object System.Drawing.Point(110, 180)
+    $iconBox.Size = New-Object System.Drawing.Size(180, 30)
+    [void]$iconBox.Items.Add('跟随界面主题')
+    foreach ($item in (Get-BuiltInIconDefinitions)) {
+        [void]$iconBox.Items.Add($item.Display)
+    }
+    [void]$iconBox.Items.Add('自定义图标')
+    $iconPreference = Get-AppIconPreference
+    $customIconPath = $iconPreference.CustomPath
+    $dialog.Tag = [pscustomobject]@{
+        FocusDelayMinutes = 0
+        CustomIconPath = $customIconPath
+    }
+    if ($iconPreference.Mode -eq 'BuiltIn') {
+        $builtInIndex = 0
+        $defs = @(Get-BuiltInIconDefinitions)
+        for ($i = 0; $i -lt $defs.Count; $i++) {
+            if ($defs[$i].Key -eq $iconPreference.BuiltIn) {
+                $builtInIndex = $i + 1
+                break
+            }
+        }
+        $iconBox.SelectedIndex = $builtInIndex
+    }
+    elseif ($iconPreference.Mode -eq 'Custom') {
+        $iconBox.SelectedIndex = $iconBox.Items.Count - 1
+    }
+    else {
+        $iconBox.SelectedIndex = 0
+    }
+    $dialog.Controls.Add($iconBox)
+
+    $iconPreview = New-Object System.Windows.Forms.PictureBox
+    $iconPreview.Location = New-Object System.Drawing.Point(306, 176)
+    $iconPreview.Size = New-Object System.Drawing.Size(42, 42)
+    $iconPreview.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+    $iconPreview.BackColor = $script:Colors.Surface
+    $dialog.Controls.Add($iconPreview)
+
+    $browseIcon = New-Object System.Windows.Forms.Button
+    $browseIcon.Text = '选择'
+    $browseIcon.Size = New-Object System.Drawing.Size(72, 30)
+    $browseIcon.Location = New-Object System.Drawing.Point(366, 180)
+    $browseIcon.BackColor = $script:Colors.Surface
+    $browseIcon.ForeColor = $script:Colors.Text
+    $browseIcon.FlatStyle = 'Flat'
+    $browseIcon.FlatAppearance.BorderColor = $script:Colors.Border
+    $browseIcon.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($browseIcon)
+
+    $iconHint = New-Object System.Windows.Forms.Label
+    $iconHint.AutoSize = $false
+    $iconHint.Location = New-Object System.Drawing.Point(110, 214)
+    $iconHint.Size = New-Object System.Drawing.Size(390, 20)
+    $iconHint.ForeColor = $script:Colors.Muted
+    $iconHint.Font = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Regular)
+    $dialog.Controls.Add($iconHint)
+
+    $updateIconPreview = {
+        $previewIcon = $null
+        $selected = [int]$iconBox.SelectedIndex
+        $defs = @(Get-BuiltInIconDefinitions)
+        if ($selected -eq 0) {
+            $previewTheme = Get-ThemeFromIndex -Index $themeBox.SelectedIndex
+            $previewIcon = Get-ThemeIcon -Theme $previewTheme
+            $iconHint.Text = '切换界面主题时，窗口和托盘图标会自动跟随。'
+            $browseIcon.Enabled = $false
+        }
+        elseif ($selected -ge 1 -and $selected -le $defs.Count) {
+            $key = $defs[$selected - 1].Key
+            $path = Get-BuiltInIconPath -Key $key
+            $previewIcon = Get-IconFromFile -Path $path -CacheKey ('builtin-preview:{0}' -f $key)
+            $iconHint.Text = '使用软件自带图标，不随主题自动改变。'
+            $browseIcon.Enabled = $false
+        }
+        else {
+            $customPath = [string]$dialog.Tag.CustomIconPath
+            $previewIcon = Get-IconFromFile -Path $customPath -CacheKey ('custom-preview:{0}' -f $customPath)
+            $iconHint.Text = if ([string]::IsNullOrWhiteSpace($customPath)) { '选择一个 .ico 或 .png 文件。' } else { $customPath }
+            $browseIcon.Enabled = $true
+        }
+
+        if ($previewIcon) {
+            $oldPreview = $iconPreview.Image
+            $iconPreview.Image = New-BitmapFromIcon -Icon $previewIcon -Size 42
+            if ($oldPreview) {
+                $oldPreview.Dispose()
+            }
+            $iconPreview.Visible = $true
+        }
+        else {
+            $iconPreview.Image = $null
+            $iconPreview.Visible = $false
+        }
+    }
+    $iconBox.Add_SelectedIndexChanged({
+        & $updateIconPreview
+    })
+    $browseIcon.Add_Click({
+        param($sender, $e)
+        $picker = New-Object System.Windows.Forms.OpenFileDialog
+        $picker.Title = '选择软件图标'
+        $picker.Filter = '图标或图片 (*.ico;*.png)|*.ico;*.png|所有文件 (*.*)|*.*'
+        $picker.Multiselect = $false
+        $existingCustomPath = [string]$sender.FindForm().Tag.CustomIconPath
+        if (-not [string]::IsNullOrWhiteSpace($existingCustomPath) -and (Test-Path -LiteralPath $existingCustomPath -PathType Leaf)) {
+            $picker.InitialDirectory = Split-Path -Parent $existingCustomPath
+        }
+        else {
+            $picker.InitialDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyPictures)
+        }
+
+        if ($picker.ShowDialog($sender.FindForm()) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:ThemeIcons.Clear()
+            $sender.FindForm().Tag.CustomIconPath = $picker.FileName
+            & $updateIconPreview
+        }
+        $picker.Dispose()
+    })
+    & $updateIconPreview
 
     $soundEnabled = New-Object System.Windows.Forms.CheckBox
     $soundEnabled.Text = '弹窗播放声音'
     $soundEnabled.AutoSize = $true
-    $soundEnabled.Location = New-Object System.Drawing.Point(28, 180)
+    $soundEnabled.Location = New-Object System.Drawing.Point(28, 244)
     $soundEnabled.BackColor = $script:Colors.Surface
     $soundEnabled.ForeColor = $script:Colors.Text
     $soundEnabled.Checked = [bool]$script:Config.Preferences.SoundEnabled
@@ -3687,7 +5058,7 @@ function Show-SettingsDialog {
     $strongPopup = New-Object System.Windows.Forms.CheckBox
     $strongPopup.Text = '饭点强提醒'
     $strongPopup.AutoSize = $true
-    $strongPopup.Location = New-Object System.Drawing.Point(164, 180)
+    $strongPopup.Location = New-Object System.Drawing.Point(164, 244)
     $strongPopup.BackColor = $script:Colors.Surface
     $strongPopup.ForeColor = $script:Colors.Text
     $strongPopup.Checked = [bool]$script:Config.Preferences.StrongPopup
@@ -3695,13 +5066,11 @@ function Show-SettingsDialog {
 
     $focusSettings = Get-FocusDoNotDisturb
     $focusDelayMinutes = Get-FocusMaxDelayMinutes
-    $dialog.Tag = [pscustomobject]@{
-        FocusDelayMinutes = $focusDelayMinutes
-    }
+    $dialog.Tag.FocusDelayMinutes = $focusDelayMinutes
     $focusDnd = New-Object System.Windows.Forms.CheckBox
     $focusDnd.Text = '专注勿扰'
     $focusDnd.AutoSize = $true
-    $focusDnd.Location = New-Object System.Drawing.Point(300, 180)
+    $focusDnd.Location = New-Object System.Drawing.Point(300, 244)
     $focusDnd.BackColor = $script:Colors.Surface
     $focusDnd.ForeColor = $script:Colors.Text
     $focusDnd.Checked = [bool]$focusSettings.Enabled
@@ -3710,7 +5079,7 @@ function Show-SettingsDialog {
     $focusHint = New-Object System.Windows.Forms.Label
     $focusHint.AutoSize = $false
     $focusHint.Text = ('开启后：键鼠静止 60 秒再弹，最多延迟 {0} 分钟。' -f $focusDelayMinutes)
-    $focusHint.Location = New-Object System.Drawing.Point(48, 206)
+    $focusHint.Location = New-Object System.Drawing.Point(48, 270)
     $focusHint.Size = New-Object System.Drawing.Size(400, 22)
     $focusHint.ForeColor = $script:Colors.Muted
     $focusHint.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
@@ -3736,15 +5105,15 @@ function Show-SettingsDialog {
     $dailyTitle = New-Object System.Windows.Forms.Label
     $dailyTitle.Text = '每日提醒'
     $dailyTitle.AutoSize = $true
-    $dailyTitle.Location = New-Object System.Drawing.Point(28, 244)
+    $dailyTitle.Location = New-Object System.Drawing.Point(28, 306)
     $dailyTitle.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
     $dailyTitle.ForeColor = $script:Colors.Text
     $dialog.Controls.Add($dailyTitle)
 
     $dailyHint = New-Object System.Windows.Forms.Label
-    $dailyHint.Text = '取消勾选可单独屏蔽对应提醒。'
+    $dailyHint.Text = '取消勾选可单独屏蔽；点“消息”可设置默认、自定义或随机消息。'
     $dailyHint.AutoSize = $true
-    $dailyHint.Location = New-Object System.Drawing.Point(112, 246)
+    $dailyHint.Location = New-Object System.Drawing.Point(112, 308)
     $dailyHint.ForeColor = $script:Colors.Muted
     $dailyHint.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
     $dialog.Controls.Add($dailyHint)
@@ -3806,29 +5175,57 @@ function Show-SettingsDialog {
         $unitLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
         $dialog.Controls.Add($unitLabel)
 
+        $messageBtn = New-Object System.Windows.Forms.Button
+        $messageBtn.Text = '消息'
+        $messageBtn.Size = New-Object System.Drawing.Size(56, 28)
+        $messageBtn.Location = New-Object System.Drawing.Point(388, ($Top + 1))
+        $messageBtn.BackColor = $script:Colors.Surface
+        $messageBtn.ForeColor = $script:Colors.Text
+        $messageBtn.FlatStyle = 'Flat'
+        $messageBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $messageBtn.FlatAppearance.BorderSize = 1
+        $messageBtn.Tag = $Name
+        $dialog.Controls.Add($messageBtn)
+
+        $messageSummary = New-Object System.Windows.Forms.Label
+        $messageSummary.AutoSize = $false
+        $messageSummary.Size = New-Object System.Drawing.Size(96, 24)
+        $messageSummary.Location = New-Object System.Drawing.Point(450, ($Top + 4))
+        $messageSummary.ForeColor = $script:Colors.Muted
+        $messageSummary.Font = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Regular)
+        $messageSummary.Text = (Get-DailyReminderMessageSummary -Item $item)
+        $dialog.Controls.Add($messageSummary)
+
+        $messageBtn.Add_Click({
+            param($sender, $e)
+            Show-DailyReminderMessageDialog -OwnerForm $sender.FindForm() -Name ([string]$sender.Tag)
+        })
+
         $dailyControls[$Name] = [pscustomobject]@{
             Enabled = $enabledBox
             Hour = $hourBox
             Minute = $minuteBox
+            MessageButton = $messageBtn
+            MessageSummary = $messageSummary
         }
     }
 
-    & $addDailyRow -Name 'Lunch' -Top 280 -DefaultHour 11 -DefaultMinute 27
-    & $addDailyRow -Name 'Dinner' -Top 318 -DefaultHour 17 -DefaultMinute 37
-    & $addDailyRow -Name 'Overtime' -Top 356 -DefaultHour 20 -DefaultMinute 58
+    & $addDailyRow -Name 'Lunch' -Top 342 -DefaultHour 11 -DefaultMinute 27
+    & $addDailyRow -Name 'Dinner' -Top 380 -DefaultHour 17 -DefaultMinute 37
+    & $addDailyRow -Name 'Overtime' -Top 418 -DefaultHour 20 -DefaultMinute 58
 
     $error = New-Object System.Windows.Forms.Label
     $error.AutoSize = $false
     $error.Text = ''
-    $error.Location = New-Object System.Drawing.Point(28, 398)
-    $error.Size = New-Object System.Drawing.Size(440, 22)
+    $error.Location = New-Object System.Drawing.Point(28, 460)
+    $error.Size = New-Object System.Drawing.Size(480, 22)
     $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
     $dialog.Controls.Add($error)
 
     $saveBtn = New-Object System.Windows.Forms.Button
     $saveBtn.Text = '保存'
     $saveBtn.Size = New-Object System.Drawing.Size(100, 36)
-    $saveBtn.Location = New-Object System.Drawing.Point(272, 458)
+    $saveBtn.Location = New-Object System.Drawing.Point(312, 518)
     $saveBtn.BackColor = $script:Colors.Blue
     $saveBtn.ForeColor = [System.Drawing.Color]::White
     $saveBtn.FlatStyle = 'Flat'
@@ -3838,7 +5235,7 @@ function Show-SettingsDialog {
     $cancel = New-Object System.Windows.Forms.Button
     $cancel.Text = '取消'
     $cancel.Size = New-Object System.Drawing.Size(100, 36)
-    $cancel.Location = New-Object System.Drawing.Point(380, 458)
+    $cancel.Location = New-Object System.Drawing.Point(420, 518)
     $cancel.BackColor = $script:Colors.Surface
     $cancel.ForeColor = $script:Colors.Text
     $cancel.FlatStyle = 'Flat'
@@ -3864,13 +5261,36 @@ function Show-SettingsDialog {
         $script:Config.Preferences.FocusDoNotDisturb.Enabled = [bool]$focusDnd.Checked
         $script:Config.Preferences.FocusDoNotDisturb.IdleSeconds = 60
         $script:Config.Preferences.FocusDoNotDisturb.MaxDelayMinutes = [int]$dialog.Tag.FocusDelayMinutes
+        $defs = @(Get-BuiltInIconDefinitions)
+        $selectedIconIndex = [int]$iconBox.SelectedIndex
+        if ($selectedIconIndex -eq 0) {
+            Set-AppIconPreference -Mode 'FollowTheme'
+        }
+        elseif ($selectedIconIndex -ge 1 -and $selectedIconIndex -le $defs.Count) {
+            Set-AppIconPreference -Mode 'BuiltIn' -BuiltIn $defs[$selectedIconIndex - 1].Key
+        }
+        else {
+            $customPath = [string]$dialog.Tag.CustomIconPath
+            if ([string]::IsNullOrWhiteSpace($customPath) -or -not (Test-Path -LiteralPath $customPath -PathType Leaf)) {
+                $error.Text = '请选择有效的自定义图标文件。'
+                return
+            }
+            Set-AppIconPreference -Mode 'Custom' -CustomPath $customPath
+        }
         foreach ($name in 'Lunch', 'Dinner', 'Overtime') {
             $row = $dailyControls[$name]
             $timeText = Format-ReminderTime -Hour ([int]$row.Hour.Value) -Minute ([int]$row.Minute.Value)
             Set-DailyReminderSettings -Name $name -Enabled ([bool]$row.Enabled.Checked) -TimeText $timeText
+            if ($row.MessageSummary) {
+                $row.MessageSummary.Text = (Get-DailyReminderMessageSummary -Item $script:Config.DailyReminders.$name)
+            }
         }
+        $script:ThemeIcons.Clear()
         Save-Config
         Set-ThemeColors -Theme $themeMode
+        if ($script:MainForm -and -not $script:MainForm.IsDisposed) {
+            $script:MainForm.Icon = Get-AppIcon
+        }
         Apply-MainTheme
         Update-MainStatus
         Update-ClockDisplay
@@ -3904,7 +5324,7 @@ function Show-ReminderPopup {
         [string]$MessageText,
         [string]$KeyName,
         [bool]$Strong = $false,
-        [bool]$Sound = $true
+        [bool]$Sound = $false
     )
 
     if ($script:ActivePopupForm -and -not $script:ActivePopupForm.IsDisposed -and $script:ActivePopupForm.Visible) {
@@ -4210,7 +5630,11 @@ function Check-Reminders {
         }
 
         if (Test-ReminderReady -Now $now -DueAt $dueAt -LastFiredDate $item.LastFiredDate) {
-            if (Show-ReminderPopup -TitleText $item.Title -MessageText $item.Message -KeyName $name -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
+            $messageMode = if ($item.PSObject.Properties.Name -contains 'MessageMode') { [string]$item.MessageMode } else { 'Default' }
+            $customMessage = if ($item.PSObject.Properties.Name -contains 'CustomMessage') { [string]$item.CustomMessage } else { '' }
+            $popupMessage = Get-DailyReminderMessage -Name $name -TimeText $item.Time -MessageMode $messageMode -CustomMessage $customMessage
+            $item.Message = $popupMessage
+            if (Show-ReminderPopup -TitleText $item.Title -MessageText $popupMessage -KeyName $name -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'DailyFired' -Message ('{0} 提醒触发，计划时间 {1}' -f (Get-DailyReminderLabel -Name $name), $item.Time)
                 $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
                 Save-Config
@@ -4225,10 +5649,8 @@ function Check-Reminders {
             continue
         }
 
-        try {
-            $dueAt = Get-ScheduledDateTime -TimeText $item.Time
-        }
-        catch {
+        $dueAt = Get-CustomReminderDueAt -Item $item
+        if ($null -eq $dueAt) {
             continue
         }
 
@@ -4263,23 +5685,46 @@ function Build-MainForm {
     Set-FormThemeIdentity -Form $form
     $form.StartPosition = 'CenterScreen'
     $form.BackColor = $script:Colors.Background
-    $form.ClientSize = New-Object System.Drawing.Size(720, 500)
+    $form.ClientSize = Get-MainWindowClientSize
     $form.MinimumSize = New-Object System.Drawing.Size(680, 460)
     $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
     Set-FormBackdrop -Form $form
 
     $form.Add_FormClosing({
+        param($sender, $e)
+
+        Save-MainWindowClientSize -Form $sender
         if (-not $script:ShouldExit) {
-            $_.Cancel = $true
-            $script:MainForm.Hide()
+            $e.Cancel = $true
+            if ($script:MainForm) {
+                $script:MainForm.Hide()
+            }
+            elseif ($sender) {
+                $sender.Hide()
+            }
+        }
+    })
+
+    $form.Add_ResizeEnd({
+        param($sender, $e)
+        Save-MainWindowClientSize -Form $sender
+    })
+
+    $form.Add_Resize({
+        try {
+            if ($script:MainThemeControls -and $script:MainThemeControls.Form -and -not $script:MainThemeControls.Form.IsDisposed) {
+                Apply-MainThemeLayout
+            }
+        }
+        catch {
+            Write-AppLog -Event 'MainLayoutResizeFailed' -Message $_.Exception.Message -Level 'WARN'
         }
     })
 
     $top = New-Object System.Windows.Forms.Panel
     $top.Dock = 'Top'
-    $top.Height = 10
+    $top.Height = 0
     $form.Controls.Add($top)
-    Set-GradientPanel -Control $top -LeftColor $script:Colors.Blue -RightColor $script:Colors.Purple
 
     $themeBanner = New-Object System.Windows.Forms.PictureBox
     $themeBanner.Location = New-Object System.Drawing.Point(378, 86)
@@ -4556,6 +6001,7 @@ function Build-MainForm {
     })
 
     $moreMenu = New-Object System.Windows.Forms.ContextMenuStrip
+    $miMoreStats = $moreMenu.Items.Add('本周统计')
     $miMoreCustom = $moreMenu.Items.Add('自定义提醒')
     $miMorePauseToday = $moreMenu.Items.Add('今日暂停提醒')
     $miMoreWorkSchedule = $moreMenu.Items.Add('工作制')
@@ -4578,6 +6024,11 @@ function Build-MainForm {
     $btnCustom.Add_Click({
         param($sender, $e)
         $sender.ContextMenuStrip.Show($sender, 0, $sender.Height)
+    })
+    $miMoreStats.Add_Click({
+        param($sender, $e)
+        $ownerForm = if ($sender.Owner -and $sender.Owner.SourceControl) { $sender.Owner.SourceControl.FindForm() } else { $script:MainForm }
+        Show-MealStatsDialog -OwnerForm $ownerForm
     })
     $miMoreCustom.Add_Click({
         param($sender, $e)
@@ -4621,7 +6072,7 @@ function Build-MainForm {
 
         if ($script:TrayIcon -eq $null) {
             $script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
-            $script:TrayIcon.Icon = Get-ThemeIcon -Theme $script:Config.Preferences.Theme
+            $script:TrayIcon.Icon = Get-AppIcon
             $script:TrayIcon.Text = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme
             $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 
@@ -4629,6 +6080,7 @@ function Build-MainForm {
             $miCompany = $trayMenu.Items.Add('公司上班')
             $miTrip = $trayMenu.Items.Add('出差中')
             $miPauseToday = $trayMenu.Items.Add('今日暂停提醒')
+            $miStats = $trayMenu.Items.Add('本周统计')
             $miCustom = $trayMenu.Items.Add('自定义提醒')
             $miWorkSchedule = $trayMenu.Items.Add('工作制')
             $miSettings = $trayMenu.Items.Add('设置')
@@ -4646,6 +6098,10 @@ function Build-MainForm {
             $miCompany.Add_Click({ Set-Mode -Mode 'Company' })
             $miTrip.Add_Click({ Set-Mode -Mode 'Trip' })
             $miPauseToday.Add_Click({ Toggle-TodayPause })
+            $miStats.Add_Click({
+                Show-MainWindow
+                Show-MealStatsDialog -OwnerForm $script:MainForm
+            })
             $miCustom.Add_Click({
                 Show-MainWindow
                 Show-CustomRemindersDialog -OwnerForm $script:MainForm
@@ -4740,6 +6196,7 @@ if (-not (Initialize-SingleInstance)) {
     exit 0
 }
 
+$null = Initialize-AppStorage
 $script:Config = Load-Config
 Write-AppLog -Event 'Startup' -Message ('程序启动，配置版本={0}，模式={1}，主题={2}' -f $script:Config.Version, $script:Config.Mode, (Get-ThemeDisplayName -Value $script:Config.Preferences.Theme))
 Set-ThemeColors -Theme $script:Config.Preferences.Theme
