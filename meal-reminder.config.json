@@ -1,5 +1,5 @@
 {
-    "Version":  7,
+    "Version":  8,
     "Mode":  "Company",
     "Preferences":  {
                         "Theme":  "Kuromi",
@@ -9,7 +9,13 @@
                                                   "Enabled":  false,
                                                   "IdleSeconds":  60,
                                                   "MaxDelayMinutes":  10
-                                              }
+                                              },
+                        "WorkSchedule":  {
+                                             "Mode":  "DoubleRest",
+                                             "SingleRestDay":  "Sunday",
+                                             "BigSmallWorkDay":  "Saturday",
+                                             "BigSmallAnchorMonday":  null
+                                         }
                     },
     "SingleReminder":  {
                            "Enabled":  true,

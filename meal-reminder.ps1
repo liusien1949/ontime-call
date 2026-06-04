@@ -732,7 +732,37 @@ function Get-AcrylicGradientColor {
 function Enable-WindowGlass {
     param([System.Windows.Forms.Form]$Form)
 
-    return
+    Apply-AppButtonChrome -Root $Form
+}
+
+function Apply-AppButtonChrome {
+    param([System.Windows.Forms.Control]$Root)
+
+    if ($null -eq $Root -or $Root.IsDisposed) {
+        return
+    }
+
+    foreach ($control in @($Root.Controls)) {
+        if ($control -is [System.Windows.Forms.Button]) {
+            $control.UseVisualStyleBackColor = $false
+            $control.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+            $control.Cursor = [System.Windows.Forms.Cursors]::Hand
+            $control.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Regular)
+            $control.Padding = New-Object System.Windows.Forms.Padding(0)
+            if ($control.FlatAppearance.BorderSize -le 0) {
+                $control.FlatAppearance.BorderSize = 1
+            }
+            if ($control.FlatAppearance.BorderColor.ToArgb() -eq [System.Drawing.Color]::Empty.ToArgb()) {
+                $control.FlatAppearance.BorderColor = $script:Colors.Border
+            }
+            $control.FlatAppearance.MouseOverBackColor = Blend-Color -From $control.BackColor -To $script:Colors.Border -Amount 0.38
+            $control.FlatAppearance.MouseDownBackColor = Blend-Color -From $control.BackColor -To $script:Colors.Border -Amount 0.62
+        }
+
+        if ($control.Controls.Count -gt 0) {
+            Apply-AppButtonChrome -Root $control
+        }
+    }
 }
 
 function Set-FormBackdrop {
@@ -742,31 +772,7 @@ function Set-FormBackdrop {
         return
     }
 
-    $Form.Add_Paint({
-        param($sender, $e)
-
-        $rect = $sender.ClientRectangle
-        if ($rect.Width -le 0 -or $rect.Height -le 0) {
-            return
-        }
-
-        $topColor = $script:Colors.Background
-        $bottomBase = Blend-Color -From $script:Colors.Background -To $script:Colors.Surface -Amount 0.55
-        $bottomColor = $bottomBase
-        $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-            $rect,
-            $topColor,
-            $bottomColor,
-            [System.Drawing.Drawing2D.LinearGradientMode]::ForwardDiagonal
-        )
-
-        try {
-            $e.Graphics.FillRectangle($brush, $rect)
-        }
-        finally {
-            $brush.Dispose()
-        }
-    })
+    $Form.BackColor = $script:Colors.Background
 }
 
 function Set-GlassPanel {
@@ -780,50 +786,7 @@ function Set-GlassPanel {
     }
 
     $Control.BackColor = $script:Colors.Surface
-    $Control.Tag = [pscustomobject]@{
-        Radius = $Radius
-        Fill = $script:Colors.Surface
-        Border = $script:Colors.Border
-        Shadow = [System.Drawing.Color]::FromArgb(18, 0, 0, 0)
-    }
-
-    $Control.Add_Paint({
-        param($sender, $e)
-
-        $style = $sender.Tag
-        if ($null -eq $style) {
-            return
-        }
-
-        $rect = $sender.ClientRectangle
-        if ($rect.Width -le 4 -or $rect.Height -le 4) {
-            return
-        }
-
-        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-
-        $shadowRect = New-Object System.Drawing.Rectangle(4, 5, ($rect.Width - 8), ($rect.Height - 9))
-        $shadowPath = New-RoundedRectanglePath -Bounds $shadowRect -Radius $style.Radius
-        $shadowBrush = New-Object System.Drawing.SolidBrush($style.Shadow)
-
-        $glassRect = New-Object System.Drawing.Rectangle(1, 1, ($rect.Width - 3), ($rect.Height - 4))
-        $glassPath = New-RoundedRectanglePath -Bounds $glassRect -Radius $style.Radius
-        $fillBrush = New-Object System.Drawing.SolidBrush($style.Fill)
-        $borderPen = New-Object System.Drawing.Pen($style.Border, 1)
-
-        try {
-            $e.Graphics.FillPath($shadowBrush, $shadowPath)
-            $e.Graphics.FillPath($fillBrush, $glassPath)
-            $e.Graphics.DrawPath($borderPen, $glassPath)
-        }
-        finally {
-            $shadowBrush.Dispose()
-            $shadowPath.Dispose()
-            $fillBrush.Dispose()
-            $borderPen.Dispose()
-            $glassPath.Dispose()
-        }
-    })
+    $Control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
 }
 
 function Update-GlassPanel {
@@ -837,15 +800,8 @@ function Update-GlassPanel {
         return
     }
 
-    $themeMode = Get-ThemeMode -Value $script:Config.Preferences.Theme
-    $shadowAlpha = if ($themeMode -eq 'Dark') { 34 } else { 14 }
     $Control.BackColor = $script:Colors.Surface
-    $Control.Tag = [pscustomobject]@{
-        Radius = $Radius
-        Fill = $script:Colors.Surface
-        Border = $script:Colors.Border
-        Shadow = [System.Drawing.Color]::FromArgb($shadowAlpha, 0, 0, 0)
-    }
+    $Control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $Control.Invalidate()
 }
 
@@ -966,6 +922,11 @@ function Set-ButtonStyle {
     $Button.FlatStyle = 'Flat'
     $Button.FlatAppearance.BorderColor = $BorderColor
     $Button.FlatAppearance.BorderSize = $BorderSize
+    $Button.FlatAppearance.MouseOverBackColor = Blend-Color -From $BackColor -To $BorderColor -Amount 0.40
+    $Button.FlatAppearance.MouseDownBackColor = Blend-Color -From $BackColor -To $BorderColor -Amount 0.65
+    $Button.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Regular)
+    $Button.Padding = New-Object System.Windows.Forms.Padding(0)
+    $Button.Cursor = [System.Windows.Forms.Cursors]::Hand
 }
 
 function Set-AnimatedButtonStyle {
@@ -1030,6 +991,88 @@ function Set-AnimatedButtonStyle {
     }
 }
 
+function Ensure-AppMenuRenderer {
+    if ('CodexMenuColors' -as [type]) {
+        return
+    }
+
+    Add-Type -ReferencedAssemblies 'System.Drawing', 'System.Windows.Forms' -TypeDefinition @'
+using System.Drawing;
+using System.Windows.Forms;
+
+public static class CodexMenuColors {
+    public static int BackArgb;
+    public static int ForeArgb;
+    public static int HoverArgb;
+    public static int BorderArgb;
+    public static int SeparatorArgb;
+}
+
+public class CodexMenuColorTable : ProfessionalColorTable {
+    private Color Back { get { return Color.FromArgb(CodexMenuColors.BackArgb); } }
+    private Color Hover { get { return Color.FromArgb(CodexMenuColors.HoverArgb); } }
+    private Color Border { get { return Color.FromArgb(CodexMenuColors.BorderArgb); } }
+    private Color Separator { get { return Color.FromArgb(CodexMenuColors.SeparatorArgb); } }
+
+    public override Color ToolStripDropDownBackground { get { return Back; } }
+    public override Color MenuBorder { get { return Border; } }
+    public override Color ToolStripBorder { get { return Border; } }
+    public override Color ImageMarginGradientBegin { get { return Back; } }
+    public override Color ImageMarginGradientMiddle { get { return Back; } }
+    public override Color ImageMarginGradientEnd { get { return Back; } }
+    public override Color MenuItemSelected { get { return Hover; } }
+    public override Color MenuItemSelectedGradientBegin { get { return Hover; } }
+    public override Color MenuItemSelectedGradientEnd { get { return Hover; } }
+    public override Color MenuItemPressedGradientBegin { get { return Hover; } }
+    public override Color MenuItemPressedGradientMiddle { get { return Hover; } }
+    public override Color MenuItemPressedGradientEnd { get { return Hover; } }
+    public override Color MenuItemBorder { get { return Border; } }
+    public override Color SeparatorDark { get { return Separator; } }
+    public override Color SeparatorLight { get { return Separator; } }
+}
+'@
+}
+
+function Apply-AppMenuTheme {
+    param([System.Windows.Forms.ContextMenuStrip]$Menu)
+
+    if ($null -eq $Menu) {
+        return
+    }
+
+    Ensure-AppMenuRenderer
+    $menuBack = $script:Colors.Surface
+    $hoverBack = Blend-Color -From $script:Colors.Surface -To $script:Colors.Border -Amount 0.55
+    $separator = Blend-Color -From $script:Colors.Border -To $script:Colors.Surface -Amount 0.25
+    [CodexMenuColors]::BackArgb = $menuBack.ToArgb()
+    [CodexMenuColors]::ForeArgb = $script:Colors.Text.ToArgb()
+    [CodexMenuColors]::HoverArgb = $hoverBack.ToArgb()
+    [CodexMenuColors]::BorderArgb = $script:Colors.Border.ToArgb()
+    [CodexMenuColors]::SeparatorArgb = $separator.ToArgb()
+
+    $Menu.RenderMode = [System.Windows.Forms.ToolStripRenderMode]::Professional
+    $Menu.Renderer = New-Object System.Windows.Forms.ToolStripProfessionalRenderer((New-Object CodexMenuColorTable))
+    $Menu.ShowImageMargin = $false
+    $Menu.ShowCheckMargin = $false
+    $Menu.BackColor = $menuBack
+    $Menu.ForeColor = $script:Colors.Text
+    $Menu.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Regular)
+    $Menu.Padding = New-Object System.Windows.Forms.Padding(6, 6, 6, 6)
+
+    foreach ($item in $Menu.Items) {
+        $item.BackColor = $menuBack
+        $item.ForeColor = $script:Colors.Text
+        $item.Font = $Menu.Font
+        if ($item -is [System.Windows.Forms.ToolStripMenuItem]) {
+            $item.AutoSize = $false
+            $item.Height = 34
+            $item.Width = 142
+            $item.Padding = New-Object System.Windows.Forms.Padding(14, 0, 14, 0)
+            $item.DisplayStyle = [System.Windows.Forms.ToolStripItemDisplayStyle]::Text
+        }
+    }
+}
+
 function Apply-MainTheme {
     if ($null -eq $script:MainThemeControls) {
         return
@@ -1042,7 +1085,7 @@ function Apply-MainTheme {
     $c.Form.Invalidate()
     Enable-WindowGlass -Form $c.Form
 
-    $c.Top.Tag = @($script:Colors.Blue, $script:Colors.Purple)
+    $c.Top.BackColor = $script:Colors.Blue
     $c.Top.Invalidate()
     Set-ThemedPicture -PictureBox $c.ThemeBanner -Kind 'banner'
     Set-ThemedPicture -PictureBox $c.ThemeIcon -Kind 'badge'
@@ -1097,30 +1140,48 @@ function Apply-MainTheme {
     $script:DetailLabel.ForeColor = $script:Colors.Muted
     $c.Tip.ForeColor = $script:Colors.Muted
 
+    $neutralBack = Blend-Color -From $script:Colors.Surface -To $script:Colors.Background -Amount 0.25
+    $neutralHover = Blend-Color -From $neutralBack -To $script:Colors.Border -Amount 0.55
+    $neutralPress = Blend-Color -From $neutralBack -To $script:Colors.Border -Amount 0.82
+    $white = [System.Drawing.Color]::White
+    $black = [System.Drawing.Color]::Black
+    $companyActive = ($script:Config.Mode -eq 'Company')
+    $tripActive = ($script:Config.Mode -eq 'Trip')
+    $companyBack = if ($companyActive) { $script:Colors.Blue } else { $neutralBack }
+    $companyFore = if ($companyActive) { $white } else { $script:Colors.Text }
+    $companyHover = if ($companyActive) { Blend-Color -From $script:Colors.Blue -To $white -Amount 0.12 } else { $neutralHover }
+    $companyPress = if ($companyActive) { Blend-Color -From $script:Colors.Blue -To $black -Amount 0.10 } else { $neutralPress }
+    $tripBack = if ($tripActive) { $script:Colors.Orange } else { $neutralBack }
+    $tripFore = if ($tripActive) { $white } else { $script:Colors.Text }
+    $tripHover = if ($tripActive) { Blend-Color -From $script:Colors.Orange -To $white -Amount 0.12 } else { $neutralHover }
+    $tripPress = if ($tripActive) { Blend-Color -From $script:Colors.Orange -To $black -Amount 0.10 } else { $neutralPress }
+    $companyBorder = if ($companyActive) { $script:Colors.Blue } else { $script:Colors.Border }
+    $tripBorder = if ($tripActive) { $script:Colors.Orange } else { $script:Colors.Border }
+
     Set-AnimatedButtonStyle -Button $c.BtnCompany `
-        -BaseBack $script:Colors.BlueSoft `
-        -BaseFore $script:Colors.Blue `
-        -HoverBack (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.18) `
-        -PressBack (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.32) `
-        -BorderColor (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.28)
+        -BaseBack $companyBack `
+        -BaseFore $companyFore `
+        -HoverBack $companyHover `
+        -PressBack $companyPress `
+        -BorderColor $companyBorder
     Set-AnimatedButtonStyle -Button $c.BtnTrip `
-        -BaseBack $script:Colors.OrangeSoft `
-        -BaseFore $script:Colors.Orange `
-        -HoverBack (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.18) `
-        -PressBack (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.32) `
-        -BorderColor (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.28)
+        -BaseBack $tripBack `
+        -BaseFore $tripFore `
+        -HoverBack $tripHover `
+        -PressBack $tripPress `
+        -BorderColor $tripBorder
     Set-AnimatedButtonStyle -Button $c.BtnTest `
-        -BaseBack $script:Colors.GreenSoft `
-        -BaseFore $script:Colors.Green `
-        -HoverBack (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.18) `
-        -PressBack (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.32) `
-        -BorderColor (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.28)
+        -BaseBack $neutralBack `
+        -BaseFore $script:Colors.Text `
+        -HoverBack $neutralHover `
+        -PressBack $neutralPress `
+        -BorderColor $script:Colors.Border
     Set-AnimatedButtonStyle -Button $c.BtnCustom `
-        -BaseBack $script:Colors.BlueSoft `
-        -BaseFore $script:Colors.Blue `
-        -HoverBack (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.18) `
-        -PressBack (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.32) `
-        -BorderColor (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.28)
+        -BaseBack $neutralBack `
+        -BaseFore $script:Colors.Text `
+        -HoverBack $neutralHover `
+        -PressBack $neutralPress `
+        -BorderColor $script:Colors.Border
     Set-AnimatedButtonStyle -Button $c.BtnSettings `
         -BaseBack $script:Colors.PurpleSoft `
         -BaseFore $script:Colors.Purple `
@@ -1139,6 +1200,12 @@ function Apply-MainTheme {
         -HoverBack (Blend-Color -From $script:Colors.Surface -To $script:Colors.Border -Amount 0.55) `
         -PressBack (Blend-Color -From $script:Colors.Surface -To $script:Colors.Border -Amount 0.82) `
         -BorderColor $script:Colors.Border
+    if ($c.BtnCustom -and $c.BtnCustom.ContextMenuStrip) {
+        Apply-AppMenuTheme -Menu $c.BtnCustom.ContextMenuStrip
+    }
+    if ($script:TrayIcon -and $script:TrayIcon.ContextMenuStrip) {
+        Apply-AppMenuTheme -Menu $script:TrayIcon.ContextMenuStrip
+    }
     Update-DailyReminderRows
 }
 
@@ -1204,6 +1271,132 @@ function Get-StartupShortcutPath {
     return (Join-Path $startupDir ($script:AppName + '.lnk'))
 }
 
+function Get-WorkScheduleMode {
+    param([string]$Value)
+
+    switch ([string]$Value) {
+        'SingleRest' { return 'SingleRest' }
+        'BigSmall' { return 'BigSmall' }
+        default { return 'DoubleRest' }
+    }
+}
+
+function Get-WeekendDay {
+    param(
+        [string]$Value,
+        [string]$Default = 'Sunday'
+    )
+
+    switch ([string]$Value) {
+        'Saturday' { return 'Saturday' }
+        'Sunday' { return 'Sunday' }
+        default {
+            if ($Default -eq 'Saturday') {
+                return 'Saturday'
+            }
+            return 'Sunday'
+        }
+    }
+}
+
+function Get-WeekendDayText {
+    param([string]$Value)
+
+    if ((Get-WeekendDay -Value $Value -Default 'Sunday') -eq 'Saturday') {
+        return '周六'
+    }
+    return '周日'
+}
+
+function Get-WeekMonday {
+    param([datetime]$Date)
+
+    $dayOfWeek = [int]$Date.DayOfWeek
+    $mondayOffset = if ($dayOfWeek -eq 0) { -6 } else { -($dayOfWeek - 1) }
+    return $Date.Date.AddDays($mondayOffset)
+}
+
+function Get-WorkSchedule {
+    if ($null -eq $script:Config -or $null -eq $script:Config.Preferences -or -not ($script:Config.Preferences.PSObject.Properties.Name -contains 'WorkSchedule')) {
+        return (Get-DefaultConfig).Preferences.WorkSchedule
+    }
+
+    $work = $script:Config.Preferences.WorkSchedule
+    if ($null -eq $work) {
+        return (Get-DefaultConfig).Preferences.WorkSchedule
+    }
+
+    $work.Mode = Get-WorkScheduleMode -Value $work.Mode
+    $work.SingleRestDay = Get-WeekendDay -Value $work.SingleRestDay -Default 'Sunday'
+    $work.BigSmallWorkDay = Get-WeekendDay -Value $work.BigSmallWorkDay -Default 'Saturday'
+    return $work
+}
+
+function Get-WorkScheduleText {
+    $work = Get-WorkSchedule
+    switch (Get-WorkScheduleMode -Value $work.Mode) {
+        'SingleRest' {
+            return ('工作制：单休（{0}休）' -f (Get-WeekendDayText -Value $work.SingleRestDay))
+        }
+        'BigSmall' {
+            return ('工作制：大小周（小周{0}上班）' -f (Get-WeekendDayText -Value $work.BigSmallWorkDay))
+        }
+        default {
+            return '工作制：双休'
+        }
+    }
+}
+
+function Test-WorkDate {
+    param([datetime]$Date)
+
+    $date = $Date.Date
+    $dow = $date.DayOfWeek
+    if ($dow -ne [System.DayOfWeek]::Saturday -and $dow -ne [System.DayOfWeek]::Sunday) {
+        return $true
+    }
+
+    $work = Get-WorkSchedule
+    switch (Get-WorkScheduleMode -Value $work.Mode) {
+        'SingleRest' {
+            $restDay = Get-WeekendDay -Value $work.SingleRestDay -Default 'Sunday'
+            if ($restDay -eq 'Saturday') {
+                return ($dow -eq [System.DayOfWeek]::Sunday)
+            }
+            return ($dow -eq [System.DayOfWeek]::Saturday)
+        }
+        'BigSmall' {
+            $anchor = $null
+            if (-not [string]::IsNullOrWhiteSpace([string]$work.BigSmallAnchorMonday)) {
+                try {
+                    $anchor = [datetime]::ParseExact([string]$work.BigSmallAnchorMonday, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+                }
+                catch {
+                    $anchor = $null
+                }
+            }
+            if ($null -eq $anchor) {
+                $anchor = Get-WeekMonday -Date (Get-Date)
+            }
+
+            $weekOffset = [int][Math]::Floor(((Get-WeekMonday -Date $date) - $anchor.Date).TotalDays / 7)
+            $isSmallWeek = ($weekOffset % 2 -eq 0)
+            if (-not $isSmallWeek) {
+                return $false
+            }
+
+            $workDay = Get-WeekendDay -Value $work.BigSmallWorkDay -Default 'Saturday'
+            if ($workDay -eq 'Sunday') {
+                return ($dow -eq [System.DayOfWeek]::Sunday)
+            }
+            return ($dow -eq [System.DayOfWeek]::Saturday)
+        }
+        default {
+            return $false
+        }
+    }
+}
+
 function Test-AutoStartEnabled {
     return (Test-Path -LiteralPath (Get-StartupShortcutPath) -PathType Leaf)
 }
@@ -1239,7 +1432,7 @@ function Set-AutoStartEnabled {
 
 function Get-DefaultConfig {
     return [pscustomobject]@{
-        Version = 7
+        Version = 8
         Mode = 'Company'
         Preferences = [pscustomobject]@{
             Theme = 'Light'
@@ -1249,6 +1442,12 @@ function Get-DefaultConfig {
                 Enabled = $false
                 IdleSeconds = 60
                 MaxDelayMinutes = 10
+            }
+            WorkSchedule = [pscustomobject]@{
+                Mode = 'DoubleRest'
+                SingleRestDay = 'Sunday'
+                BigSmallWorkDay = 'Saturday'
+                BigSmallAnchorMonday = $null
             }
         }
         SingleReminder = [pscustomobject]@{
@@ -1339,6 +1538,21 @@ function Merge-Config {
             }
             if ($focus.PSObject.Properties.Name -contains 'MaxDelayMinutes') {
                 $default.Preferences.FocusDoNotDisturb.MaxDelayMinutes = [Math]::Max(1, [Math]::Min(120, [int]$focus.MaxDelayMinutes))
+            }
+        }
+        if ($Loaded.Preferences.PSObject.Properties.Name -contains 'WorkSchedule' -and $Loaded.Preferences.WorkSchedule) {
+            $work = $Loaded.Preferences.WorkSchedule
+            if ($work.PSObject.Properties.Name -contains 'Mode') {
+                $default.Preferences.WorkSchedule.Mode = Get-WorkScheduleMode -Value $work.Mode
+            }
+            if ($work.PSObject.Properties.Name -contains 'SingleRestDay') {
+                $default.Preferences.WorkSchedule.SingleRestDay = Get-WeekendDay -Value $work.SingleRestDay -Default 'Sunday'
+            }
+            if ($work.PSObject.Properties.Name -contains 'BigSmallWorkDay') {
+                $default.Preferences.WorkSchedule.BigSmallWorkDay = Get-WeekendDay -Value $work.BigSmallWorkDay -Default 'Saturday'
+            }
+            if ($work.PSObject.Properties.Name -contains 'BigSmallAnchorMonday') {
+                $default.Preferences.WorkSchedule.BigSmallAnchorMonday = $work.BigSmallAnchorMonday
             }
         }
     }
@@ -1942,21 +2156,24 @@ function Update-DailyReminderRows {
             $row.StateLabel.ForeColor = $script:Colors.Muted
         }
 
+        $toggleBack = Blend-Color -From $script:Colors.Surface -To $script:Colors.Background -Amount 0.25
+        $toggleHover = Blend-Color -From $toggleBack -To $script:Colors.Border -Amount 0.55
+        $togglePress = Blend-Color -From $toggleBack -To $script:Colors.Border -Amount 0.82
         if ($isEnabled) {
             Set-AnimatedButtonStyle -Button $row.ToggleButton `
-                -BaseBack $script:Colors.OrangeSoft `
+                -BaseBack $toggleBack `
                 -BaseFore $script:Colors.Orange `
-                -HoverBack (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.18) `
-                -PressBack (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.32) `
-                -BorderColor (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.28)
+                -HoverBack $toggleHover `
+                -PressBack $togglePress `
+                -BorderColor $script:Colors.Border
         }
         else {
             Set-AnimatedButtonStyle -Button $row.ToggleButton `
-                -BaseBack $script:Colors.GreenSoft `
+                -BaseBack $toggleBack `
                 -BaseFore $script:Colors.Green `
-                -HoverBack (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.18) `
-                -PressBack (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.32) `
-                -BorderColor (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.28)
+                -HoverBack $toggleHover `
+                -PressBack $togglePress `
+                -BorderColor $script:Colors.Border
         }
     }
 }
@@ -2037,6 +2254,152 @@ function Get-NextCustomText {
     $enabledCount = @($items).Count
     $nextItems = @($items | Sort-Object Time | Select-Object -First 2 | ForEach-Object { '{0} {1}' -f $_.Time, $_.Title })
     return ('自定义：{0}个开启，最近 {1}' -f $enabledCount, ($nextItems -join '、'))
+}
+
+function Get-MealStats {
+    $empty = [pscustomobject]@{
+        ThisWeekTotal = 0
+        ThisWeekOnTimeCount = 0
+        ThisWeekLunchCount = 0
+        ThisWeekDinnerCount = 0
+        ThisWeekDelayedCount = 0
+        ThisWeekNotOnTimeCount = 0
+        DisplayString = ''
+    }
+
+    $today = [datetime]::Today
+    $monday = Get-WeekMonday -Date $today
+    $sunday = $monday.AddDays(6)
+
+    $workDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    $cursor = $monday
+    while ($cursor -le $today) {
+        if (Test-WorkDate -Date $cursor) {
+            [void]$workDates.Add($cursor.ToString('yyyy-MM-dd'))
+        }
+        $cursor = $cursor.AddDays(1)
+    }
+
+    if (-not (Test-Path -LiteralPath $script:LogPath -PathType Leaf)) {
+        $empty.ThisWeekTotal = $workDates.Count
+        return $empty
+    }
+
+    try {
+        $logText = Read-Utf8Text -Path $script:LogPath
+    }
+    catch {
+        $empty.ThisWeekTotal = $workDates.Count
+        return $empty
+    }
+
+    if ([string]::IsNullOrWhiteSpace($logText)) {
+        $empty.ThisWeekTotal = $workDates.Count
+        return $empty
+    }
+
+    $lunchDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    $dinnerDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    $delayedDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    $recordDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    $dailyPattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+DailyFired\s+-\s+(午饭|晚饭)\s+'
+    $snoozePattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+SnoozeSet\s+-\s+.*(午饭|晚饭)'
+
+    foreach ($line in ($logText -split "\r\n|\n|\r")) {
+        if ($line -match $dailyPattern) {
+            try {
+                $logDate = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            catch {
+                continue
+            }
+
+            if ($logDate -lt $monday -or $logDate -gt $sunday -or -not $workDates.Contains($Matches[1])) {
+                continue
+            }
+
+            [void]$recordDates.Add($Matches[1])
+            if ($Matches[2] -eq '午饭') {
+                [void]$lunchDates.Add($Matches[1])
+            }
+            elseif ($Matches[2] -eq '晚饭') {
+                [void]$dinnerDates.Add($Matches[1])
+            }
+        }
+        elseif ($line -match $snoozePattern) {
+            try {
+                $logDate = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            catch {
+                continue
+            }
+
+            if ($logDate -lt $monday -or $logDate -gt $sunday -or -not $workDates.Contains($Matches[1])) {
+                continue
+            }
+
+            [void]$recordDates.Add($Matches[1])
+            [void]$delayedDates.Add($Matches[1])
+        }
+    }
+
+    $eligibleDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($dateText in $workDates) {
+        try {
+            $dateValue = [datetime]::ParseExact($dateText, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        catch {
+            continue
+        }
+
+        if ($dateValue -lt $today -or $recordDates.Contains($dateText)) {
+            [void]$eligibleDates.Add($dateText)
+        }
+    }
+
+    $onTimeDates = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($date in $lunchDates) { [void]$onTimeDates.Add($date) }
+    foreach ($date in $dinnerDates) { [void]$onTimeDates.Add($date) }
+    foreach ($date in @($onTimeDates)) {
+        if (-not $eligibleDates.Contains($date) -or $delayedDates.Contains($date)) {
+            [void]$onTimeDates.Remove($date)
+        }
+    }
+
+    $notOnTimeCount = [Math]::Max(0, $eligibleDates.Count - $onTimeDates.Count)
+    $display = ''
+    if ($eligibleDates.Count -gt 0) {
+        $display = ('本周准点吃饭 {0}/{1} 天，不准点 {2} 天' -f $onTimeDates.Count, $eligibleDates.Count, $notOnTimeCount)
+    }
+
+    return [pscustomobject]@{
+        ThisWeekTotal = $eligibleDates.Count
+        ThisWeekOnTimeCount = $onTimeDates.Count
+        ThisWeekLunchCount = $lunchDates.Count
+        ThisWeekDinnerCount = $dinnerDates.Count
+        ThisWeekDelayedCount = $delayedDates.Count
+        ThisWeekNotOnTimeCount = $notOnTimeCount
+        DisplayString = $display
+    }
+}
+
+function Update-TrayStats {
+    if ($null -eq $script:TrayIcon) {
+        return
+    }
+
+    $baseText = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme
+    $stats = Get-MealStats
+    if ([string]::IsNullOrWhiteSpace($stats.DisplayString)) {
+        $script:TrayIcon.Text = $baseText
+        return
+    }
+
+    $text = ('{0} | {1}' -f $baseText, $stats.DisplayString)
+    if ($text.Length -gt 63) {
+        $text = $text.Substring(0, 63)
+    }
+    $script:TrayIcon.Text = $text
 }
 
 function Get-FocusDoNotDisturb {
@@ -2317,6 +2680,229 @@ function Show-FocusDoNotDisturbDialog {
     }
 
     return [int]$dialog.Tag
+}
+
+function Show-WorkScheduleDialog {
+    param([System.Windows.Forms.Form]$OwnerForm)
+
+    $work = Get-WorkSchedule
+    $mode = Get-WorkScheduleMode -Value $work.Mode
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = '工作制'
+    Set-FormThemeIdentity -Form $dialog -Suffix '工作制'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.TopMost = $true
+    $dialog.BackColor = $script:Colors.Surface
+    $dialog.ClientSize = New-Object System.Drawing.Size(460, 360)
+    $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = '工作制'
+    $title.AutoSize = $true
+    $title.Location = New-Object System.Drawing.Point(24, 24)
+    $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($title)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.AutoSize = $false
+    $hint.Text = '工作制会影响本周吃饭打卡统计的应统计日期。'
+    $hint.Location = New-Object System.Drawing.Point(26, 60)
+    $hint.Size = New-Object System.Drawing.Size(404, 24)
+    $hint.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($hint)
+
+    $doubleRest = New-Object System.Windows.Forms.RadioButton
+    $doubleRest.Text = '双休'
+    $doubleRest.AutoSize = $true
+    $doubleRest.Location = New-Object System.Drawing.Point(30, 100)
+    $doubleRest.BackColor = $script:Colors.Surface
+    $doubleRest.ForeColor = $script:Colors.Text
+    $doubleRest.Checked = ($mode -eq 'DoubleRest')
+    $dialog.Controls.Add($doubleRest)
+
+    $singleRest = New-Object System.Windows.Forms.RadioButton
+    $singleRest.Text = '单休'
+    $singleRest.AutoSize = $true
+    $singleRest.Location = New-Object System.Drawing.Point(30, 140)
+    $singleRest.BackColor = $script:Colors.Surface
+    $singleRest.ForeColor = $script:Colors.Text
+    $singleRest.Checked = ($mode -eq 'SingleRest')
+    $dialog.Controls.Add($singleRest)
+
+    $singlePanel = New-Object System.Windows.Forms.Panel
+    $singlePanel.Location = New-Object System.Drawing.Point(126, 132)
+    $singlePanel.Size = New-Object System.Drawing.Size(210, 34)
+    $singlePanel.BackColor = $script:Colors.Surface
+    $dialog.Controls.Add($singlePanel)
+
+    $singleSaturday = New-Object System.Windows.Forms.RadioButton
+    $singleSaturday.Text = '周六休'
+    $singleSaturday.AutoSize = $true
+    $singleSaturday.Location = New-Object System.Drawing.Point(0, 6)
+    $singleSaturday.BackColor = $script:Colors.Surface
+    $singleSaturday.ForeColor = $script:Colors.Text
+    $singleSaturday.Checked = ((Get-WeekendDay -Value $work.SingleRestDay -Default 'Sunday') -eq 'Saturday')
+    $singlePanel.Controls.Add($singleSaturday)
+
+    $singleSunday = New-Object System.Windows.Forms.RadioButton
+    $singleSunday.Text = '周日休'
+    $singleSunday.AutoSize = $true
+    $singleSunday.Location = New-Object System.Drawing.Point(90, 6)
+    $singleSunday.BackColor = $script:Colors.Surface
+    $singleSunday.ForeColor = $script:Colors.Text
+    $singleSunday.Checked = (-not $singleSaturday.Checked)
+    $singlePanel.Controls.Add($singleSunday)
+
+    $bigSmall = New-Object System.Windows.Forms.RadioButton
+    $bigSmall.Text = '大小周'
+    $bigSmall.AutoSize = $true
+    $bigSmall.Location = New-Object System.Drawing.Point(30, 184)
+    $bigSmall.BackColor = $script:Colors.Surface
+    $bigSmall.ForeColor = $script:Colors.Text
+    $bigSmall.Checked = ($mode -eq 'BigSmall')
+    $dialog.Controls.Add($bigSmall)
+
+    $bigPanel = New-Object System.Windows.Forms.Panel
+    $bigPanel.Location = New-Object System.Drawing.Point(126, 176)
+    $bigPanel.Size = New-Object System.Drawing.Size(300, 34)
+    $bigPanel.BackColor = $script:Colors.Surface
+    $dialog.Controls.Add($bigPanel)
+
+    $bigSaturday = New-Object System.Windows.Forms.RadioButton
+    $bigSaturday.Text = '小周周六上班'
+    $bigSaturday.AutoSize = $true
+    $bigSaturday.Location = New-Object System.Drawing.Point(0, 6)
+    $bigSaturday.BackColor = $script:Colors.Surface
+    $bigSaturday.ForeColor = $script:Colors.Text
+    $bigSaturday.Checked = ((Get-WeekendDay -Value $work.BigSmallWorkDay -Default 'Saturday') -eq 'Saturday')
+    $bigPanel.Controls.Add($bigSaturday)
+
+    $bigSunday = New-Object System.Windows.Forms.RadioButton
+    $bigSunday.Text = '小周周日上班'
+    $bigSunday.AutoSize = $true
+    $bigSunday.Location = New-Object System.Drawing.Point(130, 6)
+    $bigSunday.BackColor = $script:Colors.Surface
+    $bigSunday.ForeColor = $script:Colors.Text
+    $bigSunday.Checked = (-not $bigSaturday.Checked)
+    $bigPanel.Controls.Add($bigSunday)
+
+    $preview = New-Object System.Windows.Forms.Label
+    $preview.AutoSize = $false
+    $preview.Location = New-Object System.Drawing.Point(28, 236)
+    $preview.Size = New-Object System.Drawing.Size(400, 34)
+    $preview.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($preview)
+
+    $updatePreview = {
+        if ($doubleRest.Checked) {
+            $preview.Text = '当前选择：周一到周五统计，周六周日不统计。'
+        }
+        elseif ($singleRest.Checked) {
+            $restText = if ($singleSaturday.Checked) { '周六' } else { '周日' }
+            $preview.Text = ('当前选择：{0}休，另一个周末日计入统计。' -f $restText)
+        }
+        else {
+            $workText = if ($bigSunday.Checked) { '周日' } else { '周六' }
+            $preview.Text = ('当前选择：小周{0}上班，大周周末不统计。' -f $workText)
+        }
+    }
+
+    foreach ($control in @($doubleRest, $singleRest, $singleSaturday, $singleSunday, $bigSmall, $bigSaturday, $bigSunday)) {
+        $control.Add_CheckedChanged({ & $updatePreview })
+    }
+    $singleSaturday.Add_CheckedChanged({
+        if ($singleSaturday.Checked) {
+            $singleRest.Checked = $true
+        }
+    })
+    $singleSaturday.Add_Click({ $singleRest.Checked = $true })
+    $singleSunday.Add_CheckedChanged({
+        if ($singleSunday.Checked) {
+            $singleRest.Checked = $true
+        }
+    })
+    $singleSunday.Add_Click({ $singleRest.Checked = $true })
+    $bigSaturday.Add_CheckedChanged({
+        if ($bigSaturday.Checked) {
+            $bigSmall.Checked = $true
+        }
+    })
+    $bigSaturday.Add_Click({ $bigSmall.Checked = $true })
+    $bigSunday.Add_CheckedChanged({
+        if ($bigSunday.Checked) {
+            $bigSmall.Checked = $true
+        }
+    })
+    $bigSunday.Add_Click({ $bigSmall.Checked = $true })
+    & $updatePreview
+
+    $saveBtn = New-Object System.Windows.Forms.Button
+    $saveBtn.Text = '保存'
+    $saveBtn.Size = New-Object System.Drawing.Size(96, 36)
+    $saveBtn.Location = New-Object System.Drawing.Point(248, 304)
+    $saveBtn.BackColor = $script:Colors.Blue
+    $saveBtn.ForeColor = [System.Drawing.Color]::White
+    $saveBtn.FlatStyle = 'Flat'
+    $saveBtn.FlatAppearance.BorderSize = 0
+    $dialog.Controls.Add($saveBtn)
+
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = '取消'
+    $cancel.Size = New-Object System.Drawing.Size(96, 36)
+    $cancel.Location = New-Object System.Drawing.Point(352, 304)
+    $cancel.BackColor = $script:Colors.Surface
+    $cancel.ForeColor = $script:Colors.Text
+    $cancel.FlatStyle = 'Flat'
+    $cancel.FlatAppearance.BorderColor = $script:Colors.Border
+    $cancel.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($cancel)
+
+    $saveBtn.Add_Click({
+        param($sender, $e)
+
+        if ($doubleRest.Checked) {
+            $script:Config.Preferences.WorkSchedule.Mode = 'DoubleRest'
+        }
+        elseif ($singleRest.Checked) {
+            $script:Config.Preferences.WorkSchedule.Mode = 'SingleRest'
+            $script:Config.Preferences.WorkSchedule.SingleRestDay = if ($singleSaturday.Checked) { 'Saturday' } else { 'Sunday' }
+        }
+        else {
+            $script:Config.Preferences.WorkSchedule.Mode = 'BigSmall'
+            $script:Config.Preferences.WorkSchedule.BigSmallWorkDay = if ($bigSunday.Checked) { 'Sunday' } else { 'Saturday' }
+            if ([string]::IsNullOrWhiteSpace([string]$script:Config.Preferences.WorkSchedule.BigSmallAnchorMonday)) {
+                $script:Config.Preferences.WorkSchedule.BigSmallAnchorMonday = (Get-WeekMonday -Date (Get-Date)).ToString('yyyy-MM-dd')
+            }
+        }
+
+        Save-Config
+        Update-MainStatus
+        Update-TrayStats
+        Write-AppLog -Event 'WorkScheduleSaved' -Message (Get-WorkScheduleText)
+        Show-Toast -Message (Get-WorkScheduleText) -Accent $script:Colors.Green
+        $sender.FindForm().DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $sender.FindForm().Close()
+    })
+
+    $cancel.Add_Click({
+        param($sender, $e)
+        $sender.FindForm().DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $sender.FindForm().Close()
+    })
+
+    $dialog.Add_Shown({
+        param($sender, $e)
+        Enable-WindowGlass -Form $sender
+        Start-FormFadeIn -Form $sender -TargetOpacity 0.98
+    })
+
+    [void]$dialog.ShowDialog($OwnerForm)
 }
 
 function Play-ReminderSound {
@@ -2626,32 +3212,11 @@ function Set-GradientPanel {
         [System.Drawing.Color]$RightColor
     )
 
-    $Control.Tag = @($LeftColor, $RightColor)
-    $Control.Add_Paint({
-        param($sender, $e)
-        $rect = $sender.ClientRectangle
-        if ($rect.Width -le 0 -or $rect.Height -le 0) {
-            return
-        }
+    if ($null -eq $Control) {
+        return
+    }
 
-        $colors = $sender.Tag
-        if ($null -eq $colors -or $colors.Count -lt 2) {
-            return
-        }
-
-        $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-            $rect,
-            $colors[0],
-            $colors[1],
-            [System.Drawing.Drawing2D.LinearGradientMode]::Horizontal
-        )
-        try {
-            $e.Graphics.FillRectangle($brush, $rect)
-        }
-        finally {
-            $brush.Dispose()
-        }
-    })
+    $Control.BackColor = $LeftColor
     $Control.Invalidate()
 }
 
@@ -2720,7 +3285,7 @@ function Update-MainStatus {
     $singleMode = Get-SingleReminderScheduleMode -Value $script:Config.SingleReminder.ScheduleMode
     $singleModeText = if ($singleMode -eq 'ClockTime') { '单次：固定时刻' } else { '单次：按当前时间顺延' }
     $script:StatusLabel.Text = "当前模式：$mode"
-    $script:DetailLabel.Text = ('{0} | 单次：{1} | {2} | {3} | {4}' -f $singleModeText, (Get-SingleReminderText), (Get-NextCustomText), (Get-FocusDoNotDisturbText), (Get-TodayPauseText))
+    $script:DetailLabel.Text = ('{0} | 单次：{1} | {2} | {3} | {4} | {5}' -f $singleModeText, (Get-SingleReminderText), (Get-NextCustomText), (Get-FocusDoNotDisturbText), (Get-TodayPauseText), (Get-WorkScheduleText))
     Update-DailyReminderRows
 
     if ($script:MainThemeControls -and $script:MainThemeControls.PSObject.Properties.Name -contains 'BtnPauseToday' -and $script:MainThemeControls.BtnPauseToday) {
@@ -2757,6 +3322,7 @@ function Set-Mode {
     $script:Config.Mode = $Mode
     Save-Config
     Update-MainStatus
+    Apply-MainTheme
     Write-AppLog -Event 'ModeChanged' -Message ('当前模式：{0}' -f (Get-ModeLabel))
 
     if ($Mode -eq 'Trip') {
@@ -3908,7 +4474,7 @@ function Build-MainForm {
     $form.Controls.Add($btnTest)
 
     $btnCustom = New-Object System.Windows.Forms.Button
-    $btnCustom.Text = '自定义'
+    $btnCustom.Text = '更多'
     $btnCustom.Size = New-Object System.Drawing.Size(102, 44)
     $btnCustom.Location = New-Object System.Drawing.Point(358, 356)
     $btnCustom.BackColor = $script:Colors.BlueSoft
@@ -3926,6 +4492,7 @@ function Build-MainForm {
     $btnSettings.ForeColor = [System.Drawing.Color]::White
     $btnSettings.FlatStyle = 'Flat'
     $btnSettings.FlatAppearance.BorderSize = 0
+    $btnSettings.Visible = $false
     $form.Controls.Add($btnSettings)
 
     $btnExit = New-Object System.Windows.Forms.Button
@@ -3937,6 +4504,7 @@ function Build-MainForm {
     $btnExit.FlatStyle = 'Flat'
     $btnExit.FlatAppearance.BorderColor = $script:Colors.Border
     $btnExit.FlatAppearance.BorderSize = 1
+    $btnExit.Visible = $false
     $form.Controls.Add($btnExit)
 
     $btnPauseToday = New-Object System.Windows.Forms.Button
@@ -3948,6 +4516,7 @@ function Build-MainForm {
     $btnPauseToday.FlatStyle = 'Flat'
     $btnPauseToday.FlatAppearance.BorderColor = $script:Colors.Border
     $btnPauseToday.FlatAppearance.BorderSize = 1
+    $btnPauseToday.Visible = $false
     $form.Controls.Add($btnPauseToday)
 
     $tip = New-Object System.Windows.Forms.Label
@@ -3985,9 +4554,54 @@ function Build-MainForm {
     $btnTest.Add_Click({
         [void](Show-ReminderPopup -TitleText '测试弹窗' -MessageText '这是一个测试弹窗，用来确认界面和按钮效果。' -KeyName 'Test' -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled))
     })
+
+    $moreMenu = New-Object System.Windows.Forms.ContextMenuStrip
+    $miMoreCustom = $moreMenu.Items.Add('自定义提醒')
+    $miMorePauseToday = $moreMenu.Items.Add('今日暂停提醒')
+    $miMoreWorkSchedule = $moreMenu.Items.Add('工作制')
+    $miMoreSettings = $moreMenu.Items.Add('设置')
+    [void]$moreMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $miMoreExit = $moreMenu.Items.Add('退出')
+    $moreMenu.Tag = [pscustomobject]@{
+        PauseTodayItem = $miMorePauseToday
+    }
+    Apply-AppMenuTheme -Menu $moreMenu
+    $btnCustom.ContextMenuStrip = $moreMenu
+    $moreMenu.Add_Opening({
+        param($sender, $e)
+        $pauseItem = $sender.Tag.PauseTodayItem
+        if ($pauseItem) {
+            $pauseItem.Text = if (Test-TodayPauseActive) { '恢复今日提醒' } else { '今日暂停提醒' }
+        }
+    })
+
     $btnCustom.Add_Click({
         param($sender, $e)
-        Show-CustomRemindersDialog -OwnerForm $sender.FindForm()
+        $sender.ContextMenuStrip.Show($sender, 0, $sender.Height)
+    })
+    $miMoreCustom.Add_Click({
+        param($sender, $e)
+        $ownerForm = if ($sender.Owner -and $sender.Owner.SourceControl) { $sender.Owner.SourceControl.FindForm() } else { $script:MainForm }
+        Show-CustomRemindersDialog -OwnerForm $ownerForm
+    })
+    $miMorePauseToday.Add_Click({
+        Toggle-TodayPause
+    })
+    $miMoreWorkSchedule.Add_Click({
+        param($sender, $e)
+        $ownerForm = if ($sender.Owner -and $sender.Owner.SourceControl) { $sender.Owner.SourceControl.FindForm() } else { $script:MainForm }
+        Show-WorkScheduleDialog -OwnerForm $ownerForm
+    })
+    $miMoreSettings.Add_Click({
+        param($sender, $e)
+        $ownerForm = if ($sender.Owner -and $sender.Owner.SourceControl) { $sender.Owner.SourceControl.FindForm() } else { $script:MainForm }
+        Show-SettingsDialog -OwnerForm $ownerForm
+    })
+    $miMoreExit.Add_Click({
+        param($sender, $e)
+        $ownerForm = if ($sender.Owner -and $sender.Owner.SourceControl) { $sender.Owner.SourceControl.FindForm() } else { $script:MainForm }
+        $script:ShouldExit = $true
+        $ownerForm.Close()
     })
     $btnSettings.Add_Click({
         param($sender, $e)
@@ -4016,9 +4630,11 @@ function Build-MainForm {
             $miTrip = $trayMenu.Items.Add('出差中')
             $miPauseToday = $trayMenu.Items.Add('今日暂停提醒')
             $miCustom = $trayMenu.Items.Add('自定义提醒')
+            $miWorkSchedule = $trayMenu.Items.Add('工作制')
             $miSettings = $trayMenu.Items.Add('设置')
             [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
             $miExit = $trayMenu.Items.Add('退出')
+            Apply-AppMenuTheme -Menu $trayMenu
 
             $miShow.Add_Click({
                 if ($script:MainForm.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
@@ -4033,6 +4649,10 @@ function Build-MainForm {
             $miCustom.Add_Click({
                 Show-MainWindow
                 Show-CustomRemindersDialog -OwnerForm $script:MainForm
+            })
+            $miWorkSchedule.Add_Click({
+                Show-MainWindow
+                Show-WorkScheduleDialog -OwnerForm $script:MainForm
             })
             $miSettings.Add_Click({
                 Show-MainWindow
@@ -4071,6 +4691,7 @@ function Build-MainForm {
     $reminderTimer.Interval = 15000
     $reminderTimer.Add_Tick({ Check-Reminders })
     $reminderTimer.Add_Tick({ Update-MainStatus })
+    $reminderTimer.Add_Tick({ Update-TrayStats })
 
     $clockTimer = New-Object System.Windows.Forms.Timer
     $clockTimer.Interval = 1000
