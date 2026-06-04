@@ -1,0 +1,45 @@
+﻿{
+    "Version":  4,
+    "Mode":  "Company",
+    "Preferences":  {
+                        "Theme":  "Pikachu"
+                    },
+    "SingleReminder":  {
+                           "Enabled":  true,
+                           "At":  "2026-05-15T08:07:02.7128475+08:00",
+                           "Triggered":  true,
+                           "ScheduleMode":  "Relative",
+                           "Label":  "单次提醒",
+                           "Message":  "你设置的单次提醒时间到了。"
+                       },
+    "SnoozeReminder":  {
+                           "Enabled":  false,
+                           "Until":  null,
+                           "Title":  "加班结束",
+                           "Message":  "晚上 20:57 到啦，今天可以收工了。",
+                           "KeyName":  "Overtime"
+                       },
+    "DailyReminders":  {
+                           "Lunch":  {
+                                         "Enabled":  true,
+                                         "Time":  "11:27",
+                                         "Title":  "午饭时间到",
+                                         "Message":  "中午 11:27 到啦，先去吃饭。",
+                                         "LastFiredDate":  "2026-06-03"
+                                     },
+                           "Dinner":  {
+                                          "Enabled":  true,
+                                          "Time":  "17:37",
+                                          "Title":  "晚饭时间到",
+                                          "Message":  "下午 17:37 到啦，去吃晚饭。",
+                                          "LastFiredDate":  "2026-06-03"
+                                      },
+                           "Overtime":  {
+                                            "Enabled":  true,
+                                            "Time":  "20:57",
+                                            "Title":  "加班结束",
+                                            "Message":  "晚上 20:57 到啦，今天可以收工了。",
+                                            "LastFiredDate":  "2026-06-02"
+                                        }
+                       }
+}
