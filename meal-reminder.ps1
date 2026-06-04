@@ -4592,6 +4592,53 @@ function Show-Toast {
     [void]$toast.Show()
 }
 
+function Show-WindowsToast {
+    param(
+        [string]$Title,
+        [string]$Message,
+        [string]$AppLogo = ''
+    )
+
+    try {
+        # 加载 Windows Runtime 程序集
+        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+        [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
+
+        # 构建 Toast XML
+        $toastXml = @"
+<toast>
+    <visual>
+        <binding template="ToastGeneric">
+            <text>$Title</text>
+            <text>$Message</text>
+        </binding>
+    </visual>
+    <audio src="ms-winsoundevent:Notification.Default"/>
+</toast>
+"@
+
+        # 创建 XML 文档
+        $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+        $xml.LoadXml($toastXml)
+
+        # 获取 Toast Notifier
+        # 使用 PowerShell 的 AppId
+        $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+        $toast = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId)
+
+        # 创建并显示通知
+        $notification = [Windows.UI.Notifications.ToastNotification]::new($xml)
+        $toast.Show($notification)
+
+        Write-AppLog -Event 'WindowsToastShown' -Message ('{0}: {1}' -f $Title, $Message)
+        return $true
+    }
+    catch {
+        Write-AppLog -Event 'WindowsToastFailed' -Message $_.Exception.Message -Level 'WARN'
+        return $false
+    }
+}
+
 function Update-MainStatus {
     if ($null -eq $script:MainForm -or $script:MainForm.IsDisposed) {
         return
@@ -5714,6 +5761,7 @@ function Check-Reminders {
             $popupMessage = Get-DailyReminderMessage -Name $name -TimeText $item.Time -MessageMode $messageMode -CustomMessage $customMessage
             $item.Message = $popupMessage
             Start-TrayIconBlink
+            Show-WindowsToast -Title $item.Title -Message $popupMessage
             if (Show-ReminderPopup -TitleText $item.Title -MessageText $popupMessage -KeyName $name -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'DailyFired' -Message ('{0} 提醒触发，计划时间 {1}' -f (Get-DailyReminderLabel -Name $name), $item.Time)
                 $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
@@ -5736,6 +5784,7 @@ function Check-Reminders {
 
         if (Test-ReminderReady -Now $now -DueAt $dueAt -LastFiredDate $item.LastFiredDate) {
             Start-TrayIconBlink
+            Show-WindowsToast -Title $item.Title -Message $item.Message
             if (Show-ReminderPopup -TitleText $item.Title -MessageText $item.Message -KeyName ('Custom:{0}' -f $item.Id) -Strong ([bool]$item.Strong) -Sound ([bool]$item.Sound)) {
                 Write-AppLog -Event 'CustomFired' -Message ('{0} 提醒触发，计划时间 {1}' -f $item.Title, $item.Time)
                 $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
@@ -5751,6 +5800,7 @@ function Check-Reminders {
         $when = ConvertTo-SingleReminderDateTime -At $single.At -BaseNow $now
         if ($null -ne $when -and (Test-ReminderReady -Now $now -DueAt $when -LastFiredDate $null)) {
             Start-TrayIconBlink
+            Show-WindowsToast -Title $single.Label -Message $single.Message
             if (Show-ReminderPopup -TitleText $single.Label -MessageText $single.Message -KeyName 'Single' -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'SingleFired' -Message ('单次提醒触发：{0}' -f (Format-SingleReminderDisplay -At $when))
                 $script:Config.SingleReminder.Triggered = $true
