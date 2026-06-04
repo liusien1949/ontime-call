@@ -133,6 +133,7 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $script:TrayIconBlinkTimer = $null
 $script:TrayIconBlinkCount = 0
 $script:TrayIconBlinkMaxCount = 6
+$script:TrayIconOriginalIcon = $null
 
 $script:Colors = [ordered]@{
     Background = [System.Drawing.Color]::FromArgb(248, 250, 252)
@@ -2706,6 +2707,9 @@ function Get-DailyReminderRandomMessage {
         $usedIndices = @($item.UsedRandomMessages)
     }
 
+    # 清理无效的索引（大于等于池大小的索引）
+    $usedIndices = @($usedIndices | Where-Object { $_ -ge 0 -and $_ -lt $pool.Count })
+
     # 过滤掉已使用的消息
     $availableIndices = @()
     for ($i = 0; $i -lt $pool.Count; $i++) {
@@ -2723,16 +2727,24 @@ function Get-DailyReminderRandomMessage {
         $usedIndices = @()
     }
 
-    # 随机选择一个
-    $random = New-Object System.Random
+    # 随机选择一个（使用 GUID 哈希作为种子，避免快速连续调用产生相同结果）
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    try {
+        $hashBytes = $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes([guid]::NewGuid().ToString()))
+        $seed = [System.BitConverter]::ToInt32($hashBytes, 0)
+    }
+    finally {
+        $md5.Dispose()
+    }
+    $random = New-Object System.Random($seed)
     $selectedIndex = $availableIndices[$random.Next(0, $availableIndices.Count)]
 
     # 记录已使用
     $usedIndices += $selectedIndex
     $item.UsedRandomMessages = $usedIndices
 
-    # 保存配置
-    Save-Config
+    # 保存配置（不在这里保存，由调用方决定何时保存，避免频繁写入）
+    # Save-Config
 
     return $pool[$selectedIndex]
 }
@@ -3506,6 +3518,9 @@ function Start-TrayIconBlink {
     # 如果已经在闪烁，先停止
     Stop-TrayIconBlink
 
+    # 保存原始图标
+    $script:TrayIconOriginalIcon = $script:TrayIcon.Icon
+
     $script:TrayIconBlinkCount = 0
     $script:TrayIconBlinkTimer = New-Object System.Windows.Forms.Timer
     $script:TrayIconBlinkTimer.Interval = 500
@@ -3516,12 +3531,15 @@ function Start-TrayIconBlink {
 
         # 交替显示图标和透明图标
         if ($script:TrayIconBlinkCount % 2 -eq 1) {
-            # 显示透明图标
-            $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application
+            # 显示透明图标（使用空白图标）
+            $blankIcon = New-Object System.Drawing.Icon([System.Drawing.SystemIcons]::Application, 16, 16)
+            $script:TrayIcon.Icon = $blankIcon
         }
         else {
-            # 显示正常图标
-            $script:TrayIcon.Icon = Get-AppIcon
+            # 显示原始图标
+            if ($null -ne $script:TrayIconOriginalIcon) {
+                $script:TrayIcon.Icon = $script:TrayIconOriginalIcon
+            }
         }
 
         # 达到最大闪烁次数后停止
@@ -3539,9 +3557,10 @@ function Stop-TrayIconBlink {
         $script:TrayIconBlinkTimer = $null
     }
 
-    # 恢复正常图标
-    if ($null -ne $script:TrayIcon) {
-        $script:TrayIcon.Icon = Get-AppIcon
+    # 恢复原始图标
+    if ($null -ne $script:TrayIcon -and $null -ne $script:TrayIconOriginalIcon) {
+        $script:TrayIcon.Icon = $script:TrayIconOriginalIcon
+        $script:TrayIconOriginalIcon = $null
     }
 
     $script:TrayIconBlinkCount = 0
@@ -4592,6 +4611,16 @@ function Show-Toast {
     [void]$toast.Show()
 }
 
+function ConvertTo-XmlEscaped {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&apos;')
+}
+
 function Show-WindowsToast {
     param(
         [string]$Title,
@@ -4604,13 +4633,17 @@ function Show-WindowsToast {
         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
         [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
 
+        # 转义 XML 特殊字符
+        $escapedTitle = ConvertTo-XmlEscaped -Text $Title
+        $escapedMessage = ConvertTo-XmlEscaped -Text $Message
+
         # 构建 Toast XML
         $toastXml = @"
 <toast>
     <visual>
         <binding template="ToastGeneric">
-            <text>$Title</text>
-            <text>$Message</text>
+            <text>$escapedTitle</text>
+            <text>$escapedMessage</text>
         </binding>
     </visual>
     <audio src="ms-winsoundevent:Notification.Default"/>
@@ -4622,7 +4655,7 @@ function Show-WindowsToast {
         $xml.LoadXml($toastXml)
 
         # 获取 Toast Notifier
-        # 使用 PowerShell 的 AppId
+        # 使用 PowerShell 的 AppId（适用于通过 VBS 或直接启动的情况）
         $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
         $toast = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId)
 
