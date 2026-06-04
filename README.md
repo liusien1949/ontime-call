@@ -24,7 +24,7 @@
 
 ### 方式一：双击启动（推荐）
 
-解压后直接双击 `启动饭点提醒.bat`，程序会缩到系统托盘静默运行。
+解压后直接双击 `meal-reminder.vbs`，程序会缩到系统托盘静默运行。
 
 ### 方式二：命令行
 
@@ -34,7 +34,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -STA -File ".\meal-reminder.ps1"
 
 ### 方式三：设为开机自启
 
-打开主界面 → 设置 → 勾选「开机自动启动」。不需要管理员权限，会在开始菜单的启动文件夹里放一个快捷方式。
+打开主界面 → 设置 → 勾选「开机自动启动」。不需要管理员权限，会在启动文件夹里放一个快捷方式。程序自带的 `meal-reminder.vbs` 就是为此准备的——设置开机自启时会自动用 `wscript.exe` 调用它。如果你重命名或移动了 VBS 文件，开机自启可能失效，需要重新设置。
 
 ---
 
@@ -147,13 +147,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -STA -File ".\meal-reminder.ps1"
 
 ```text
 ontime-call/
-├── meal-reminder.ps1          # 主程序
-├── meal-reminder.vbs          # VBS 静默启动入口
-├── 启动饭点提醒.bat            # 双击启动批处理
+├── meal-reminder.ps1          # 主程序（6232 行 PowerShell + Windows Forms）
+├── meal-reminder.vbs          # VBS 静默启动入口，双击此文件即可运行
 ├── 打包便携版.ps1              # 便携版打包脚本
 ├── README.md
+├── .gitignore
 ├── assets/
-│   ├── icons/                 # 内置 .ico 图标
+│   ├── icons/                 # 内置 .ico 图标（6 个）
 │   └── themes/                # 主题图片（badge/banner/popup）
 └── dist/                      # 打包输出（gitignore）
 ```
