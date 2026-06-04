@@ -63,6 +63,38 @@ public static class WindowVisualEffects
 '@
 }
 
+if (-not ('UserIdleTracker' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class UserIdleTracker
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LASTINPUTINFO
+    {
+        public uint cbSize;
+        public uint dwTime;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+    public static uint GetIdleMilliseconds()
+    {
+        LASTINPUTINFO info = new LASTINPUTINFO();
+        info.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+        if (!GetLastInputInfo(ref info))
+        {
+            return 0;
+        }
+
+        return ((uint)Environment.TickCount) - info.dwTime;
+    }
+}
+'@
+}
+
 Set-StrictMode -Version Latest
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
@@ -75,6 +107,7 @@ $script:ShowRequestPath = Join-Path $script:BaseDir 'meal-reminder.show'
 $script:Config = $null
 $script:MainForm = $null
 $script:TrayIcon = $null
+$script:TrayPauseTodayItem = $null
 $script:StatusLabel = $null
 $script:DetailLabel = $null
 $script:ClockLabel = $null
@@ -88,6 +121,7 @@ $script:SingleInstanceMutex = $null
 $script:ThemeImages = @{}
 $script:ThemeIcons = @{}
 $script:LastShowRequest = ''
+$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 $script:Colors = [ordered]@{
     Background = [System.Drawing.Color]::FromArgb(248, 250, 252)
@@ -1081,12 +1115,24 @@ function Apply-MainTheme {
         -HoverBack (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.18) `
         -PressBack (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.32) `
         -BorderColor (Blend-Color -From $script:Colors.GreenSoft -To $script:Colors.Green -Amount 0.28)
+    Set-AnimatedButtonStyle -Button $c.BtnCustom `
+        -BaseBack $script:Colors.BlueSoft `
+        -BaseFore $script:Colors.Blue `
+        -HoverBack (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.18) `
+        -PressBack (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.32) `
+        -BorderColor (Blend-Color -From $script:Colors.BlueSoft -To $script:Colors.Blue -Amount 0.28)
     Set-AnimatedButtonStyle -Button $c.BtnSettings `
         -BaseBack $script:Colors.PurpleSoft `
         -BaseFore $script:Colors.Purple `
         -HoverBack (Blend-Color -From $script:Colors.PurpleSoft -To $script:Colors.Purple -Amount 0.18) `
         -PressBack (Blend-Color -From $script:Colors.PurpleSoft -To $script:Colors.Purple -Amount 0.32) `
         -BorderColor (Blend-Color -From $script:Colors.PurpleSoft -To $script:Colors.Purple -Amount 0.28)
+    Set-AnimatedButtonStyle -Button $c.BtnPauseToday `
+        -BaseBack $script:Colors.OrangeSoft `
+        -BaseFore $script:Colors.Orange `
+        -HoverBack (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.18) `
+        -PressBack (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.32) `
+        -BorderColor (Blend-Color -From $script:Colors.OrangeSoft -To $script:Colors.Orange -Amount 0.28)
     Set-AnimatedButtonStyle -Button $c.BtnExit `
         -BaseBack $script:Colors.Surface `
         -BaseFore $script:Colors.Text `
@@ -1121,8 +1167,10 @@ function Apply-MainThemeLayout {
         $c.BtnCompany.Location = New-Object System.Drawing.Point(28, 422)
         $c.BtnTrip.Location = New-Object System.Drawing.Point(138, 422)
         $c.BtnTest.Location = New-Object System.Drawing.Point(248, 422)
+        $c.BtnCustom.Location = New-Object System.Drawing.Point(358, 422)
         $c.BtnSettings.Location = New-Object System.Drawing.Point(468, 422)
         $c.BtnExit.Location = New-Object System.Drawing.Point(608, 422)
+        $c.BtnPauseToday.Location = New-Object System.Drawing.Point(468, 480)
         $c.Tip.Location = New-Object System.Drawing.Point(28, 488)
         return
     }
@@ -1144,8 +1192,10 @@ function Apply-MainThemeLayout {
     $c.BtnCompany.Location = New-Object System.Drawing.Point(28, 356)
     $c.BtnTrip.Location = New-Object System.Drawing.Point(138, 356)
     $c.BtnTest.Location = New-Object System.Drawing.Point(248, 356)
+    $c.BtnCustom.Location = New-Object System.Drawing.Point(358, 356)
     $c.BtnSettings.Location = New-Object System.Drawing.Point(468, 356)
     $c.BtnExit.Location = New-Object System.Drawing.Point(608, 356)
+    $c.BtnPauseToday.Location = New-Object System.Drawing.Point(468, 414)
     $c.Tip.Location = New-Object System.Drawing.Point(28, 422)
 }
 
@@ -1189,10 +1239,17 @@ function Set-AutoStartEnabled {
 
 function Get-DefaultConfig {
     return [pscustomobject]@{
-        Version = 4
+        Version = 7
         Mode = 'Company'
         Preferences = [pscustomobject]@{
             Theme = 'Light'
+            SoundEnabled = $true
+            StrongPopup = $false
+            FocusDoNotDisturb = [pscustomobject]@{
+                Enabled = $false
+                IdleSeconds = 60
+                MaxDelayMinutes = 10
+            }
         }
         SingleReminder = [pscustomobject]@{
             Enabled = $false
@@ -1208,6 +1265,10 @@ function Get-DefaultConfig {
             Title = ''
             Message = ''
             KeyName = ''
+        }
+        TodayPause = [pscustomobject]@{
+            Enabled = $false
+            Until = $null
         }
         DailyReminders = [pscustomobject]@{
             Lunch = [pscustomobject]@{
@@ -1232,6 +1293,7 @@ function Get-DefaultConfig {
                 LastFiredDate = $null
             }
         }
+        CustomReminders = @()
     }
 }
 
@@ -1261,6 +1323,24 @@ function Merge-Config {
         if ($Loaded.Preferences.PSObject.Properties.Name -contains 'Theme') {
             $default.Preferences.Theme = Get-ThemeMode -Value $Loaded.Preferences.Theme
         }
+        if ($Loaded.Preferences.PSObject.Properties.Name -contains 'SoundEnabled') {
+            $default.Preferences.SoundEnabled = [bool]$Loaded.Preferences.SoundEnabled
+        }
+        if ($Loaded.Preferences.PSObject.Properties.Name -contains 'StrongPopup') {
+            $default.Preferences.StrongPopup = [bool]$Loaded.Preferences.StrongPopup
+        }
+        if ($Loaded.Preferences.PSObject.Properties.Name -contains 'FocusDoNotDisturb' -and $Loaded.Preferences.FocusDoNotDisturb) {
+            $focus = $Loaded.Preferences.FocusDoNotDisturb
+            if ($focus.PSObject.Properties.Name -contains 'Enabled') {
+                $default.Preferences.FocusDoNotDisturb.Enabled = [bool]$focus.Enabled
+            }
+            if ($focus.PSObject.Properties.Name -contains 'IdleSeconds') {
+                $default.Preferences.FocusDoNotDisturb.IdleSeconds = [Math]::Max(3, [Math]::Min(60, [int]$focus.IdleSeconds))
+            }
+            if ($focus.PSObject.Properties.Name -contains 'MaxDelayMinutes') {
+                $default.Preferences.FocusDoNotDisturb.MaxDelayMinutes = [Math]::Max(1, [Math]::Min(120, [int]$focus.MaxDelayMinutes))
+            }
+        }
     }
 
     if ($Loaded.PSObject.Properties.Name -contains 'SingleReminder' -and $Loaded.SingleReminder) {
@@ -1275,6 +1355,14 @@ function Merge-Config {
         foreach ($prop in 'Enabled', 'Until', 'Title', 'Message', 'KeyName') {
             if ($Loaded.SnoozeReminder.PSObject.Properties.Name -contains $prop) {
                 $default.SnoozeReminder.$prop = $Loaded.SnoozeReminder.$prop
+            }
+        }
+    }
+
+    if ($Loaded.PSObject.Properties.Name -contains 'TodayPause' -and $Loaded.TodayPause) {
+        foreach ($prop in 'Enabled', 'Until') {
+            if ($Loaded.TodayPause.PSObject.Properties.Name -contains $prop) {
+                $default.TodayPause.$prop = $Loaded.TodayPause.$prop
             }
         }
     }
@@ -1297,13 +1385,104 @@ function Merge-Config {
         }
     }
 
+    if ($Loaded.PSObject.Properties.Name -contains 'CustomReminders' -and $Loaded.CustomReminders) {
+        $customItems = New-Object System.Collections.Generic.List[object]
+        foreach ($item in @($Loaded.CustomReminders)) {
+            if ($null -eq $item) {
+                continue
+            }
+
+            $timeText = if ($item.PSObject.Properties.Name -contains 'Time') { [string]$item.Time } else { '' }
+            try {
+                [void](Get-TimeOfDay -Value $timeText)
+            }
+            catch {
+                continue
+            }
+
+            $idText = if ($item.PSObject.Properties.Name -contains 'Id' -and -not [string]::IsNullOrWhiteSpace([string]$item.Id)) {
+                [string]$item.Id
+            }
+            else {
+                [guid]::NewGuid().ToString('N')
+            }
+
+            $titleText = if ($item.PSObject.Properties.Name -contains 'Title' -and -not [string]::IsNullOrWhiteSpace([string]$item.Title)) {
+                [string]$item.Title
+            }
+            else {
+                '自定义提醒'
+            }
+
+            $messageText = if ($item.PSObject.Properties.Name -contains 'Message' -and -not [string]::IsNullOrWhiteSpace([string]$item.Message)) {
+                [string]$item.Message
+            }
+            else {
+                '你设置的自定义提醒时间到了。'
+            }
+
+            $enabledValue = $true
+            if ($item.PSObject.Properties.Name -contains 'Enabled') {
+                $enabledValue = [bool]$item.Enabled
+            }
+
+            $lastFiredValue = $null
+            if ($item.PSObject.Properties.Name -contains 'LastFiredDate') {
+                $lastFiredValue = $item.LastFiredDate
+            }
+
+            $strongValue = $false
+            if ($item.PSObject.Properties.Name -contains 'Strong') {
+                $strongValue = [bool]$item.Strong
+            }
+
+            $soundValue = $true
+            if ($item.PSObject.Properties.Name -contains 'Sound') {
+                $soundValue = [bool]$item.Sound
+            }
+
+            $customItems.Add([pscustomobject]@{
+                Id = $idText
+                Enabled = $enabledValue
+                Time = $timeText
+                Title = $titleText
+                Message = $messageText
+                LastFiredDate = $lastFiredValue
+                Strong = $strongValue
+                Sound = $soundValue
+            })
+        }
+        $default.CustomReminders = @($customItems)
+    }
+
     return $default
+}
+
+function Read-Utf8Text {
+    param([string]$Path)
+    return [System.IO.File]::ReadAllText($Path, $script:Utf8NoBom)
+}
+
+function Write-Utf8Text {
+    param(
+        [string]$Path,
+        [string]$Text
+    )
+    [System.IO.File]::WriteAllText($Path, $Text, $script:Utf8NoBom)
+}
+
+function Add-Utf8Line {
+    param(
+        [string]$Path,
+        [string]$Text
+    )
+    [System.IO.File]::AppendAllText($Path, $Text + [Environment]::NewLine, $script:Utf8NoBom)
 }
 
 function Load-Config {
     if (Test-Path -LiteralPath $script:ConfigPath) {
         try {
-            $raw = Get-Content -LiteralPath $script:ConfigPath -Raw -Encoding UTF8
+            $raw = Read-Utf8Text -Path $script:ConfigPath
             if ([string]::IsNullOrWhiteSpace($raw)) {
                 return Get-DefaultConfig
             }
@@ -1320,7 +1499,7 @@ function Load-Config {
 
 function Save-Config {
     $json = $script:Config | ConvertTo-Json -Depth 8
-    Set-Content -LiteralPath $script:ConfigPath -Value $json -Encoding UTF8
+    Write-Utf8Text -Path $script:ConfigPath -Text $json
 }
 
 function Write-AppLog {
@@ -1334,7 +1513,7 @@ function Write-AppLog {
         $safeEvent = if ([string]::IsNullOrWhiteSpace($Event)) { 'General' } else { $Event.Trim() }
         $safeMessage = if ($null -eq $Message) { '' } else { ($Message -replace "(`r`n|`n|`r)", ' ').Trim() }
         $line = '{0} [{1}] {2} - {3}' -f ([datetime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Level, $safeEvent, $safeMessage
-        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
+        Add-Utf8Line -Path $script:LogPath -Text $line
     }
     catch {
     }
@@ -1348,7 +1527,7 @@ function Get-RecentLogText {
     }
 
     try {
-        return ((Get-Content -LiteralPath $script:LogPath -Tail $Tail -Encoding UTF8) -join [Environment]::NewLine)
+        return ((Read-Utf8Text -Path $script:LogPath) -split "\r\n|\n|\r" | Select-Object -Last $Tail) -join [Environment]::NewLine
     }
     catch {
         return ('读取日志失败：{0}' -f $_.Exception.Message)
@@ -1796,6 +1975,650 @@ function Toggle-DailyReminderBlock {
     Show-Toast -Message ('{0}提醒{1}' -f (Get-DailyReminderLabel -Name $Name), $action) -Accent $accent
 }
 
+function Get-CustomReminderList {
+    if ($null -eq $script:Config -or -not ($script:Config.PSObject.Properties.Name -contains 'CustomReminders') -or $null -eq $script:Config.CustomReminders) {
+        return @()
+    }
+
+    return @($script:Config.CustomReminders)
+}
+
+function New-CustomReminder {
+    param(
+        [string]$TimeText = '09:00',
+        [string]$Title = '自定义提醒',
+        [string]$Message = '你设置的自定义提醒时间到了。',
+        [bool]$Enabled = $true,
+        [bool]$Strong = $false,
+        [bool]$Sound = $true
+    )
+
+    return [pscustomobject]@{
+        Id = [guid]::NewGuid().ToString('N')
+        Enabled = $Enabled
+        Time = $TimeText
+        Title = $Title
+        Message = $Message
+        LastFiredDate = $null
+        Strong = $Strong
+        Sound = $Sound
+    }
+}
+
+function Get-CustomReminderDisplayText {
+    param([object]$Item)
+
+    if ($null -eq $Item) {
+        return ''
+    }
+
+    $state = if (-not [bool]$Item.Enabled) {
+        '已关闭'
+    }
+    elseif ($script:Config.Mode -eq 'Trip') {
+        '出差屏蔽'
+    }
+    elseif ($Item.LastFiredDate -eq (Get-Date).ToString('yyyy-MM-dd')) {
+        '今日已提醒'
+    }
+    else {
+        '待提醒'
+    }
+
+    return ('{0}  {1}  [{2}]' -f $Item.Time, $Item.Title, $state)
+}
+
+function Get-NextCustomText {
+    $items = Get-CustomReminderList | Where-Object { [bool]$_.Enabled }
+    if (-not $items -or @($items).Count -eq 0) {
+        return '自定义：未设置'
+    }
+
+    $enabledCount = @($items).Count
+    $nextItems = @($items | Sort-Object Time | Select-Object -First 2 | ForEach-Object { '{0} {1}' -f $_.Time, $_.Title })
+    return ('自定义：{0}个开启，最近 {1}' -f $enabledCount, ($nextItems -join '、'))
+}
+
+function Get-FocusDoNotDisturb {
+    if ($null -eq $script:Config -or $null -eq $script:Config.Preferences -or -not ($script:Config.Preferences.PSObject.Properties.Name -contains 'FocusDoNotDisturb')) {
+        return [pscustomobject]@{
+            Enabled = $false
+            IdleSeconds = 60
+            MaxDelayMinutes = 10
+        }
+    }
+
+    return $script:Config.Preferences.FocusDoNotDisturb
+}
+
+function Get-FocusIdleSeconds {
+    $focus = Get-FocusDoNotDisturb
+    try {
+        return [Math]::Max(3, [Math]::Min(60, [int]$focus.IdleSeconds))
+    }
+    catch {
+        return 60
+    }
+}
+
+function Get-FocusMaxDelayMinutes {
+    $focus = Get-FocusDoNotDisturb
+    try {
+        return [Math]::Max(1, [Math]::Min(120, [int]$focus.MaxDelayMinutes))
+    }
+    catch {
+        return 10
+    }
+}
+
+function Get-UserIdleSeconds {
+    try {
+        return [Math]::Floor(([double][UserIdleTracker]::GetIdleMilliseconds()) / 1000)
+    }
+    catch {
+        Write-AppLog -Event 'IdleCheckFailed' -Message $_.Exception.Message -Level 'WARN'
+        return 999999
+    }
+}
+
+function Test-FocusDoNotDisturbActive {
+    $focus = Get-FocusDoNotDisturb
+    return [bool]$focus.Enabled
+}
+
+function Get-FocusDoNotDisturbText {
+    if (-not (Test-FocusDoNotDisturbActive)) {
+        return '专注勿扰：关闭'
+    }
+
+    return ('专注勿扰：开启，静止 {0} 秒弹，最多延迟 {1} 分钟' -f (Get-FocusIdleSeconds), (Get-FocusMaxDelayMinutes))
+}
+
+function Get-TodayPauseUntil {
+    if ($null -eq $script:Config -or -not ($script:Config.PSObject.Properties.Name -contains 'TodayPause') -or $null -eq $script:Config.TodayPause) {
+        return $null
+    }
+
+    return Ensure-DateTime $script:Config.TodayPause.Until
+}
+
+function Test-TodayPauseActive {
+    if ($null -eq $script:Config -or -not ($script:Config.PSObject.Properties.Name -contains 'TodayPause') -or $null -eq $script:Config.TodayPause) {
+        return $false
+    }
+
+    if (-not [bool]$script:Config.TodayPause.Enabled) {
+        return $false
+    }
+
+    $until = Get-TodayPauseUntil
+    if ($null -eq $until) {
+        return $false
+    }
+
+    if ($until -le [datetime]::Now) {
+        $script:Config.TodayPause.Enabled = $false
+        $script:Config.TodayPause.Until = $null
+        Save-Config
+        return $false
+    }
+
+    return $true
+}
+
+function Get-TodayPauseText {
+    if (-not (Test-TodayPauseActive)) {
+        return '今日暂停：关闭'
+    }
+
+    return ('今日暂停：开启，到 {0:MM-dd HH:mm}' -f (Get-TodayPauseUntil))
+}
+
+function Set-TodayPause {
+    $until = ([datetime]::Today).AddDays(1)
+    $script:Config.TodayPause.Enabled = $true
+    $script:Config.TodayPause.Until = $until.ToString('o')
+    Save-Config
+    Update-MainStatus
+    Write-AppLog -Event 'TodayPauseSet' -Message ('今日提醒暂停到 {0:yyyy-MM-dd HH:mm:ss}' -f $until)
+    Show-Toast -Message '今日提醒已暂停，明天自动恢复' -Accent $script:Colors.Orange
+}
+
+function Clear-TodayPause {
+    if ($null -eq $script:Config -or $null -eq $script:Config.TodayPause) {
+        return
+    }
+
+    $script:Config.TodayPause.Enabled = $false
+    $script:Config.TodayPause.Until = $null
+    Save-Config
+    Update-MainStatus
+    Write-AppLog -Event 'TodayPauseCleared' -Message '今日暂停已取消'
+    Show-Toast -Message '今日提醒已恢复' -Accent $script:Colors.Green
+}
+
+function Toggle-TodayPause {
+    if (Test-TodayPauseActive) {
+        Clear-TodayPause
+        return
+    }
+
+    Set-TodayPause
+}
+
+function Test-FocusShouldDelay {
+    param(
+        [datetime]$Now,
+        [datetime]$DueAt
+    )
+
+    if (-not (Test-FocusDoNotDisturbActive)) {
+        return $false
+    }
+
+    if ($Now -ge $DueAt.AddMinutes((Get-FocusMaxDelayMinutes))) {
+        return $false
+    }
+
+    return ((Get-UserIdleSeconds) -lt (Get-FocusIdleSeconds))
+}
+
+function Test-ReminderReady {
+    param(
+        [datetime]$Now,
+        [datetime]$DueAt,
+        [string]$LastFiredDate
+    )
+
+    if ($LastFiredDate -eq $Now.ToString('yyyy-MM-dd')) {
+        return $false
+    }
+
+    if ($Now -lt $DueAt) {
+        return $false
+    }
+
+    $windowMinutes = if (Test-FocusDoNotDisturbActive) {
+        Get-FocusMaxDelayMinutes
+    }
+    else {
+        5
+    }
+
+    if ($Now -gt $DueAt.AddMinutes($windowMinutes).AddMinutes(5)) {
+        return $false
+    }
+
+    if (Test-FocusShouldDelay -Now $Now -DueAt $DueAt) {
+        return $false
+    }
+
+    return $true
+}
+
+function Show-FocusDoNotDisturbDialog {
+    param([System.Windows.Forms.Form]$OwnerForm)
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = '专注勿扰'
+    Set-FormThemeIdentity -Form $dialog -Suffix '专注勿扰'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.TopMost = $true
+    $dialog.BackColor = $script:Colors.Surface
+    $dialog.ClientSize = New-Object System.Drawing.Size(430, 220)
+    $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = '专注勿扰'
+    $title.AutoSize = $true
+    $title.Location = New-Object System.Drawing.Point(24, 24)
+    $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($title)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.AutoSize = $false
+    $hint.Text = '提醒到点后，如果你正在动键盘或鼠标，会先不弹窗；检测到键盘和鼠标都静止 60 秒后再弹。'
+    $hint.Location = New-Object System.Drawing.Point(26, 62)
+    $hint.Size = New-Object System.Drawing.Size(372, 46)
+    $hint.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($hint)
+
+    $delayLabel = New-Object System.Windows.Forms.Label
+    $delayLabel.Text = '最多延迟'
+    $delayLabel.AutoSize = $true
+    $delayLabel.Location = New-Object System.Drawing.Point(28, 128)
+    $delayLabel.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($delayLabel)
+
+    $delayBox = New-Object System.Windows.Forms.NumericUpDown
+    $delayBox.Minimum = 1
+    $delayBox.Maximum = 120
+    $delayBox.Value = Get-FocusMaxDelayMinutes
+    $delayBox.Location = New-Object System.Drawing.Point(112, 124)
+    $delayBox.Size = New-Object System.Drawing.Size(80, 28)
+    $delayBox.TextAlign = [System.Windows.Forms.HorizontalAlignment]::Center
+    $dialog.Controls.Add($delayBox)
+
+    $minuteLabel = New-Object System.Windows.Forms.Label
+    $minuteLabel.Text = '分钟后强制弹出'
+    $minuteLabel.AutoSize = $true
+    $minuteLabel.Location = New-Object System.Drawing.Point(204, 128)
+    $minuteLabel.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($minuteLabel)
+
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = '保存'
+    $ok.Size = New-Object System.Drawing.Size(96, 36)
+    $ok.Location = New-Object System.Drawing.Point(206, 170)
+    $ok.BackColor = $script:Colors.Blue
+    $ok.ForeColor = [System.Drawing.Color]::White
+    $ok.FlatStyle = 'Flat'
+    $ok.FlatAppearance.BorderSize = 0
+    $dialog.Controls.Add($ok)
+
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = '取消'
+    $cancel.Size = New-Object System.Drawing.Size(96, 36)
+    $cancel.Location = New-Object System.Drawing.Point(310, 170)
+    $cancel.BackColor = $script:Colors.Surface
+    $cancel.ForeColor = $script:Colors.Text
+    $cancel.FlatStyle = 'Flat'
+    $cancel.FlatAppearance.BorderColor = $script:Colors.Border
+    $cancel.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($cancel)
+
+    $ok.Add_Click({
+        param($sender, $e)
+        $sender.FindForm().Tag = [int]$delayBox.Value
+        $sender.FindForm().DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $sender.FindForm().Close()
+    })
+
+    $cancel.Add_Click({
+        param($sender, $e)
+        $sender.FindForm().DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $sender.FindForm().Close()
+    })
+
+    $dialog.Add_Shown({
+        param($sender, $e)
+        Enable-WindowGlass -Form $sender
+        Start-FormFadeIn -Form $sender -TargetOpacity 0.98
+    })
+
+    $result = $dialog.ShowDialog($OwnerForm)
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        return $null
+    }
+
+    return [int]$dialog.Tag
+}
+
+function Play-ReminderSound {
+    param([bool]$Strong = $false)
+
+    try {
+        if ($Strong) {
+            [System.Media.SystemSounds]::Exclamation.Play()
+            Start-Sleep -Milliseconds 180
+            [System.Media.SystemSounds]::Exclamation.Play()
+            return
+        }
+
+        [System.Media.SystemSounds]::Asterisk.Play()
+    }
+    catch {
+        Write-AppLog -Event 'SoundFailed' -Message $_.Exception.Message -Level 'WARN'
+    }
+}
+
+function Show-CustomRemindersDialog {
+    param([System.Windows.Forms.Form]$OwnerForm)
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = '自定义提醒'
+    Set-FormThemeIdentity -Form $dialog -Suffix '自定义提醒'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ClientSize = New-Object System.Drawing.Size(680, 520)
+    $dialog.BackColor = $script:Colors.Background
+    $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $dialog.Opacity = 0
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = '自定义提醒'
+    $title.AutoSize = $true
+    $title.Location = New-Object System.Drawing.Point(24, 18)
+    $title.Font = New-Object System.Drawing.Font('Segoe UI', 15, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($title)
+
+    $list = New-Object System.Windows.Forms.ListBox
+    $list.Location = New-Object System.Drawing.Point(24, 58)
+    $list.Size = New-Object System.Drawing.Size(292, 346)
+    $list.BackColor = $script:Colors.Surface
+    $list.ForeColor = $script:Colors.Text
+    $list.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $dialog.Controls.Add($list)
+
+    $enabled = New-Object System.Windows.Forms.CheckBox
+    $enabled.Text = '启用'
+    $enabled.Checked = $true
+    $enabled.Location = New-Object System.Drawing.Point(346, 58)
+    $enabled.Size = New-Object System.Drawing.Size(86, 24)
+    $enabled.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($enabled)
+
+    $sound = New-Object System.Windows.Forms.CheckBox
+    $sound.Text = '播放声音'
+    $sound.Checked = $true
+    $sound.Location = New-Object System.Drawing.Point(438, 58)
+    $sound.Size = New-Object System.Drawing.Size(104, 24)
+    $sound.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($sound)
+
+    $strong = New-Object System.Windows.Forms.CheckBox
+    $strong.Text = '强提醒'
+    $strong.Checked = $false
+    $strong.Location = New-Object System.Drawing.Point(548, 58)
+    $strong.Size = New-Object System.Drawing.Size(94, 24)
+    $strong.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($strong)
+
+    $timeLabel = New-Object System.Windows.Forms.Label
+    $timeLabel.Text = '时间'
+    $timeLabel.AutoSize = $true
+    $timeLabel.Location = New-Object System.Drawing.Point(346, 100)
+    $timeLabel.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($timeLabel)
+
+    $hour = New-Object System.Windows.Forms.NumericUpDown
+    $hour.Minimum = 0
+    $hour.Maximum = 23
+    $hour.Value = 9
+    $hour.Location = New-Object System.Drawing.Point(346, 126)
+    $hour.Size = New-Object System.Drawing.Size(70, 26)
+    $dialog.Controls.Add($hour)
+
+    $minute = New-Object System.Windows.Forms.NumericUpDown
+    $minute.Minimum = 0
+    $minute.Maximum = 59
+    $minute.Value = 0
+    $minute.Location = New-Object System.Drawing.Point(426, 126)
+    $minute.Size = New-Object System.Drawing.Size(70, 26)
+    $dialog.Controls.Add($minute)
+
+    $nameLabel = New-Object System.Windows.Forms.Label
+    $nameLabel.Text = '标题'
+    $nameLabel.AutoSize = $true
+    $nameLabel.Location = New-Object System.Drawing.Point(346, 174)
+    $nameLabel.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($nameLabel)
+
+    $nameBox = New-Object System.Windows.Forms.TextBox
+    $nameBox.Location = New-Object System.Drawing.Point(346, 200)
+    $nameBox.Size = New-Object System.Drawing.Size(298, 26)
+    $nameBox.Text = '自定义提醒'
+    $dialog.Controls.Add($nameBox)
+
+    $messageLabel = New-Object System.Windows.Forms.Label
+    $messageLabel.Text = '提醒内容'
+    $messageLabel.AutoSize = $true
+    $messageLabel.Location = New-Object System.Drawing.Point(346, 246)
+    $messageLabel.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($messageLabel)
+
+    $messageBox = New-Object System.Windows.Forms.TextBox
+    $messageBox.Location = New-Object System.Drawing.Point(346, 272)
+    $messageBox.Size = New-Object System.Drawing.Size(298, 92)
+    $messageBox.Multiline = $true
+    $messageBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $messageBox.Text = '你设置的自定义提醒时间到了。'
+    $dialog.Controls.Add($messageBox)
+
+    $error = New-Object System.Windows.Forms.Label
+    $error.AutoSize = $false
+    $error.Text = ''
+    $error.Location = New-Object System.Drawing.Point(24, 420)
+    $error.Size = New-Object System.Drawing.Size(620, 22)
+    $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
+    $dialog.Controls.Add($error)
+
+    $newBtn = New-Object System.Windows.Forms.Button
+    $newBtn.Text = '新增'
+    $newBtn.Size = New-Object System.Drawing.Size(92, 36)
+    $newBtn.Location = New-Object System.Drawing.Point(24, 456)
+    $newBtn.BackColor = $script:Colors.Green
+    $newBtn.ForeColor = [System.Drawing.Color]::White
+    $newBtn.FlatStyle = 'Flat'
+    $newBtn.FlatAppearance.BorderSize = 0
+    $dialog.Controls.Add($newBtn)
+
+    $saveBtn = New-Object System.Windows.Forms.Button
+    $saveBtn.Text = '保存'
+    $saveBtn.Size = New-Object System.Drawing.Size(92, 36)
+    $saveBtn.Location = New-Object System.Drawing.Point(446, 456)
+    $saveBtn.BackColor = $script:Colors.Blue
+    $saveBtn.ForeColor = [System.Drawing.Color]::White
+    $saveBtn.FlatStyle = 'Flat'
+    $saveBtn.FlatAppearance.BorderSize = 0
+    $dialog.Controls.Add($saveBtn)
+
+    $deleteBtn = New-Object System.Windows.Forms.Button
+    $deleteBtn.Text = '删除'
+    $deleteBtn.Size = New-Object System.Drawing.Size(92, 36)
+    $deleteBtn.Location = New-Object System.Drawing.Point(124, 456)
+    $deleteBtn.BackColor = $script:Colors.OrangeSoft
+    $deleteBtn.ForeColor = $script:Colors.Orange
+    $deleteBtn.FlatStyle = 'Flat'
+    $deleteBtn.FlatAppearance.BorderColor = $script:Colors.Border
+    $deleteBtn.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($deleteBtn)
+
+    $closeBtn = New-Object System.Windows.Forms.Button
+    $closeBtn.Text = '关闭'
+    $closeBtn.Size = New-Object System.Drawing.Size(92, 36)
+    $closeBtn.Location = New-Object System.Drawing.Point(552, 456)
+    $closeBtn.BackColor = $script:Colors.Surface
+    $closeBtn.ForeColor = $script:Colors.Text
+    $closeBtn.FlatStyle = 'Flat'
+    $closeBtn.FlatAppearance.BorderColor = $script:Colors.Border
+    $closeBtn.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($closeBtn)
+
+    $refreshList = {
+        $selectedId = $null
+        $itemsBefore = Get-CustomReminderList
+        if ($list.SelectedIndex -ge 0 -and $list.SelectedIndex -lt @($itemsBefore).Count) {
+            $selectedId = @($itemsBefore)[$list.SelectedIndex].Id
+        }
+
+        $list.Items.Clear()
+        foreach ($item in (Get-CustomReminderList)) {
+            [void]$list.Items.Add((Get-CustomReminderDisplayText -Item $item))
+        }
+
+        if ($selectedId) {
+            $itemsAfter = Get-CustomReminderList
+            for ($i = 0; $i -lt @($itemsAfter).Count; $i++) {
+                if (@($itemsAfter)[$i].Id -eq $selectedId) {
+                    $list.SelectedIndex = $i
+                    break
+                }
+            }
+        }
+    }
+
+    $loadSelected = {
+        $items = Get-CustomReminderList
+        if ($list.SelectedIndex -lt 0 -or $list.SelectedIndex -ge @($items).Count) {
+            return
+        }
+
+        $item = @($items)[$list.SelectedIndex]
+        $parts = Get-DailyReminderTimeParts -TimeText $item.Time -DefaultHour 9 -DefaultMinute 0
+        $hour.Value = $parts.Hour
+        $minute.Value = $parts.Minute
+        $nameBox.Text = [string]$item.Title
+        $messageBox.Text = [string]$item.Message
+        $enabled.Checked = [bool]$item.Enabled
+        $strong.Checked = [bool]$item.Strong
+        $sound.Checked = [bool]$item.Sound
+        $error.Text = ''
+    }
+
+    $list.Add_SelectedIndexChanged({ & $loadSelected })
+
+    $newBtn.Add_Click({
+        $list.ClearSelected()
+        $hour.Value = 9
+        $minute.Value = 0
+        $nameBox.Text = '自定义提醒'
+        $messageBox.Text = '你设置的自定义提醒时间到了。'
+        $enabled.Checked = $true
+        $sound.Checked = $true
+        $strong.Checked = $false
+        $error.Text = ''
+        $nameBox.Focus()
+        $nameBox.SelectAll()
+    })
+
+    $saveBtn.Add_Click({
+        $titleText = $nameBox.Text.Trim()
+        $messageText = $messageBox.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($titleText)) {
+            $error.Text = '标题不能为空。'
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($messageText)) {
+            $messageText = '你设置的自定义提醒时间到了。'
+        }
+
+        $timeText = Format-ReminderTime -Hour ([int]$hour.Value) -Minute ([int]$minute.Value)
+        $items = Get-CustomReminderList
+        if ($list.SelectedIndex -ge 0 -and $list.SelectedIndex -lt @($items).Count) {
+            $item = @($items)[$list.SelectedIndex]
+            $changed = ([string]$item.Time -ne $timeText) -or ([string]$item.Title -ne $titleText)
+            $item.Enabled = [bool]$enabled.Checked
+            $item.Time = $timeText
+            $item.Title = $titleText
+            $item.Message = $messageText
+            $item.Strong = [bool]$strong.Checked
+            $item.Sound = [bool]$sound.Checked
+            if ($changed) {
+                $item.LastFiredDate = $null
+            }
+            $script:Config.CustomReminders = @($items)
+        }
+        else {
+            $newItem = New-CustomReminder -TimeText $timeText -Title $titleText -Message $messageText -Enabled ([bool]$enabled.Checked) -Strong ([bool]$strong.Checked) -Sound ([bool]$sound.Checked)
+            $script:Config.CustomReminders = @($items) + $newItem
+        }
+
+        Save-Config
+        Update-MainStatus
+        Write-AppLog -Event 'CustomReminderSaved' -Message (Get-NextCustomText)
+        & $refreshList
+        Show-Toast -Message '自定义提醒已保存' -Accent $script:Colors.Green
+    })
+
+    $deleteBtn.Add_Click({
+        $items = Get-CustomReminderList
+        if ($list.SelectedIndex -lt 0 -or $list.SelectedIndex -ge @($items).Count) {
+            $error.Text = '先选中一个提醒再删除。'
+            return
+        }
+
+        $removeId = @($items)[$list.SelectedIndex].Id
+        $script:Config.CustomReminders = @($items | Where-Object { $_.Id -ne $removeId })
+        Save-Config
+        Update-MainStatus
+        Write-AppLog -Event 'CustomReminderDeleted' -Message ('Id={0}' -f $removeId)
+        $list.ClearSelected()
+        & $refreshList
+    })
+
+    $closeBtn.Add_Click({
+        $dialog.Close()
+    })
+
+    $dialog.Add_Shown({
+        param($sender, $e)
+        & $refreshList
+        Enable-WindowGlass -Form $sender
+        Start-FormFadeIn -Form $sender -TargetOpacity 0.98
+    })
+
+    [void]$dialog.ShowDialog($OwnerForm)
+}
+
 function Set-GradientPanel {
     param(
         [System.Windows.Forms.Control]$Control,
@@ -1897,12 +2720,20 @@ function Update-MainStatus {
     $singleMode = Get-SingleReminderScheduleMode -Value $script:Config.SingleReminder.ScheduleMode
     $singleModeText = if ($singleMode -eq 'ClockTime') { '单次：固定时刻' } else { '单次：按当前时间顺延' }
     $script:StatusLabel.Text = "当前模式：$mode"
-    $script:DetailLabel.Text = ('{0} | 单次提醒：{1}' -f $singleModeText, (Get-SingleReminderText))
+    $script:DetailLabel.Text = ('{0} | 单次：{1} | {2} | {3} | {4}' -f $singleModeText, (Get-SingleReminderText), (Get-NextCustomText), (Get-FocusDoNotDisturbText), (Get-TodayPauseText))
     Update-DailyReminderRows
+
+    if ($script:MainThemeControls -and $script:MainThemeControls.PSObject.Properties.Name -contains 'BtnPauseToday' -and $script:MainThemeControls.BtnPauseToday) {
+        $script:MainThemeControls.BtnPauseToday.Text = if (Test-TodayPauseActive) { '恢复今日' } else { '今日暂停' }
+    }
 
     if ($script:TrayIcon) {
         $script:TrayIcon.Text = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme
         $script:TrayIcon.Icon = Get-ThemeIcon -Theme $script:Config.Preferences.Theme
+    }
+
+    if ($script:TrayPauseTodayItem) {
+        $script:TrayPauseTodayItem.Text = if (Test-TodayPauseActive) { '恢复今日提醒' } else { '今日暂停提醒' }
     }
 }
 
@@ -2199,7 +3030,7 @@ function Show-SettingsDialog {
     $dialog.ShowInTaskbar = $false
     $dialog.TopMost = $true
     $dialog.BackColor = $script:Colors.Surface
-    $dialog.ClientSize = New-Object System.Drawing.Size(500, 430)
+    $dialog.ClientSize = New-Object System.Drawing.Size(500, 510)
     $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 
     $header = New-Object System.Windows.Forms.Panel
@@ -2278,10 +3109,68 @@ function Show-SettingsDialog {
         & $updateThemePreview
     })
 
+    $soundEnabled = New-Object System.Windows.Forms.CheckBox
+    $soundEnabled.Text = '弹窗播放声音'
+    $soundEnabled.AutoSize = $true
+    $soundEnabled.Location = New-Object System.Drawing.Point(28, 180)
+    $soundEnabled.BackColor = $script:Colors.Surface
+    $soundEnabled.ForeColor = $script:Colors.Text
+    $soundEnabled.Checked = [bool]$script:Config.Preferences.SoundEnabled
+    $dialog.Controls.Add($soundEnabled)
+
+    $strongPopup = New-Object System.Windows.Forms.CheckBox
+    $strongPopup.Text = '饭点强提醒'
+    $strongPopup.AutoSize = $true
+    $strongPopup.Location = New-Object System.Drawing.Point(164, 180)
+    $strongPopup.BackColor = $script:Colors.Surface
+    $strongPopup.ForeColor = $script:Colors.Text
+    $strongPopup.Checked = [bool]$script:Config.Preferences.StrongPopup
+    $dialog.Controls.Add($strongPopup)
+
+    $focusSettings = Get-FocusDoNotDisturb
+    $focusDelayMinutes = Get-FocusMaxDelayMinutes
+    $dialog.Tag = [pscustomobject]@{
+        FocusDelayMinutes = $focusDelayMinutes
+    }
+    $focusDnd = New-Object System.Windows.Forms.CheckBox
+    $focusDnd.Text = '专注勿扰'
+    $focusDnd.AutoSize = $true
+    $focusDnd.Location = New-Object System.Drawing.Point(300, 180)
+    $focusDnd.BackColor = $script:Colors.Surface
+    $focusDnd.ForeColor = $script:Colors.Text
+    $focusDnd.Checked = [bool]$focusSettings.Enabled
+    $dialog.Controls.Add($focusDnd)
+
+    $focusHint = New-Object System.Windows.Forms.Label
+    $focusHint.AutoSize = $false
+    $focusHint.Text = ('开启后：键鼠静止 60 秒再弹，最多延迟 {0} 分钟。' -f $focusDelayMinutes)
+    $focusHint.Location = New-Object System.Drawing.Point(48, 206)
+    $focusHint.Size = New-Object System.Drawing.Size(400, 22)
+    $focusHint.ForeColor = $script:Colors.Muted
+    $focusHint.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
+    $dialog.Controls.Add($focusHint)
+
+    $focusDnd.Add_CheckedChanged({
+        param($sender, $e)
+        if (-not $sender.Checked) {
+            $focusHint.Text = '专注勿扰已关闭。'
+            return
+        }
+
+        $selectedDelay = Show-FocusDoNotDisturbDialog -OwnerForm $sender.FindForm()
+        if ($null -eq $selectedDelay) {
+            $sender.Checked = $false
+            return
+        }
+
+        $sender.FindForm().Tag.FocusDelayMinutes = [int]$selectedDelay
+        $focusHint.Text = ('开启后：键鼠静止 60 秒再弹，最多延迟 {0} 分钟。' -f [int]$selectedDelay)
+    })
+
     $dailyTitle = New-Object System.Windows.Forms.Label
     $dailyTitle.Text = '每日提醒'
     $dailyTitle.AutoSize = $true
-    $dailyTitle.Location = New-Object System.Drawing.Point(28, 186)
+    $dailyTitle.Location = New-Object System.Drawing.Point(28, 244)
     $dailyTitle.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
     $dailyTitle.ForeColor = $script:Colors.Text
     $dialog.Controls.Add($dailyTitle)
@@ -2289,7 +3178,7 @@ function Show-SettingsDialog {
     $dailyHint = New-Object System.Windows.Forms.Label
     $dailyHint.Text = '取消勾选可单独屏蔽对应提醒。'
     $dailyHint.AutoSize = $true
-    $dailyHint.Location = New-Object System.Drawing.Point(112, 188)
+    $dailyHint.Location = New-Object System.Drawing.Point(112, 246)
     $dailyHint.ForeColor = $script:Colors.Muted
     $dailyHint.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
     $dialog.Controls.Add($dailyHint)
@@ -2358,14 +3247,14 @@ function Show-SettingsDialog {
         }
     }
 
-    & $addDailyRow -Name 'Lunch' -Top 222 -DefaultHour 11 -DefaultMinute 27
-    & $addDailyRow -Name 'Dinner' -Top 260 -DefaultHour 17 -DefaultMinute 37
-    & $addDailyRow -Name 'Overtime' -Top 298 -DefaultHour 20 -DefaultMinute 58
+    & $addDailyRow -Name 'Lunch' -Top 280 -DefaultHour 11 -DefaultMinute 27
+    & $addDailyRow -Name 'Dinner' -Top 318 -DefaultHour 17 -DefaultMinute 37
+    & $addDailyRow -Name 'Overtime' -Top 356 -DefaultHour 20 -DefaultMinute 58
 
     $error = New-Object System.Windows.Forms.Label
     $error.AutoSize = $false
     $error.Text = ''
-    $error.Location = New-Object System.Drawing.Point(28, 340)
+    $error.Location = New-Object System.Drawing.Point(28, 398)
     $error.Size = New-Object System.Drawing.Size(440, 22)
     $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
     $dialog.Controls.Add($error)
@@ -2373,7 +3262,7 @@ function Show-SettingsDialog {
     $saveBtn = New-Object System.Windows.Forms.Button
     $saveBtn.Text = '保存'
     $saveBtn.Size = New-Object System.Drawing.Size(100, 36)
-    $saveBtn.Location = New-Object System.Drawing.Point(272, 378)
+    $saveBtn.Location = New-Object System.Drawing.Point(272, 458)
     $saveBtn.BackColor = $script:Colors.Blue
     $saveBtn.ForeColor = [System.Drawing.Color]::White
     $saveBtn.FlatStyle = 'Flat'
@@ -2383,7 +3272,7 @@ function Show-SettingsDialog {
     $cancel = New-Object System.Windows.Forms.Button
     $cancel.Text = '取消'
     $cancel.Size = New-Object System.Drawing.Size(100, 36)
-    $cancel.Location = New-Object System.Drawing.Point(380, 378)
+    $cancel.Location = New-Object System.Drawing.Point(380, 458)
     $cancel.BackColor = $script:Colors.Surface
     $cancel.ForeColor = $script:Colors.Text
     $cancel.FlatStyle = 'Flat'
@@ -2404,6 +3293,11 @@ function Show-SettingsDialog {
 
         $themeMode = Get-ThemeFromIndex -Index $themeBox.SelectedIndex
         $script:Config.Preferences.Theme = $themeMode
+        $script:Config.Preferences.SoundEnabled = [bool]$soundEnabled.Checked
+        $script:Config.Preferences.StrongPopup = [bool]$strongPopup.Checked
+        $script:Config.Preferences.FocusDoNotDisturb.Enabled = [bool]$focusDnd.Checked
+        $script:Config.Preferences.FocusDoNotDisturb.IdleSeconds = 60
+        $script:Config.Preferences.FocusDoNotDisturb.MaxDelayMinutes = [int]$dialog.Tag.FocusDelayMinutes
         foreach ($name in 'Lunch', 'Dinner', 'Overtime') {
             $row = $dailyControls[$name]
             $timeText = Format-ReminderTime -Hour ([int]$row.Hour.Value) -Minute ([int]$row.Minute.Value)
@@ -2414,7 +3308,7 @@ function Show-SettingsDialog {
         Apply-MainTheme
         Update-MainStatus
         Update-ClockDisplay
-        Write-AppLog -Event 'SettingsSaved' -Message ('主题={0}，每日提醒={1}' -f (Get-ThemeDisplayName -Value $themeMode), (Get-NextDailyText))
+        Write-AppLog -Event 'SettingsSaved' -Message ('主题={0}，每日提醒={1}，{2}' -f (Get-ThemeDisplayName -Value $themeMode), (Get-NextDailyText), (Get-FocusDoNotDisturbText))
 
         $dialog.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $dialog.Close()
@@ -2442,7 +3336,9 @@ function Show-ReminderPopup {
     param(
         [string]$TitleText,
         [string]$MessageText,
-        [string]$KeyName
+        [string]$KeyName,
+        [bool]$Strong = $false,
+        [bool]$Sound = $true
     )
 
     if ($script:ActivePopupForm -and -not $script:ActivePopupForm.IsDisposed -and $script:ActivePopupForm.Visible) {
@@ -2457,7 +3353,10 @@ function Show-ReminderPopup {
     Set-FormThemeIdentity -Form $popup -Suffix $TitleText
     $popup.Tag = [pscustomobject]@{
         TitleText = $TitleText
+        MessageText = $MessageText
         KeyName = $KeyName
+        Strong = $Strong
+        Sound = $Sound
     }
     $popup.StartPosition = 'CenterScreen'
     $popup.FormBorderStyle = 'FixedDialog'
@@ -2481,7 +3380,10 @@ function Show-ReminderPopup {
     $left.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
     $popup.Controls.Add($left)
 
-    $headline = if ($KeyName -eq 'Lunch') {
+    $headline = if ($Strong) {
+        [System.Drawing.Color]::FromArgb(220, 38, 38)
+    }
+    elseif ($KeyName -eq 'Lunch') {
         $script:Colors.Blue
     }
     elseif ($KeyName -eq 'Dinner') {
@@ -2597,7 +3499,12 @@ function Show-ReminderPopup {
 
     $footer = New-Object System.Windows.Forms.Label
     $footer.AutoSize = $false
-    $footer.Text = '提示：忙完再看可点贪睡，点击“朕知道了”即可关闭。'
+    $footer.Text = if ($Strong) {
+        '强提醒已开启：忙完再看可点贪睡，点击“朕知道了”即可关闭。'
+    }
+    else {
+        '提示：忙完再看可点贪睡，点击“朕知道了”即可关闭。'
+    }
     $footer.Location = New-Object System.Drawing.Point(24, 258)
     $footer.Size = New-Object System.Drawing.Size(488, 22)
     $footer.ForeColor = $script:Colors.Muted
@@ -2646,9 +3553,18 @@ function Show-ReminderPopup {
 
     $popup.Add_Shown({
         param($sender, $e)
-        Enable-WindowGlass -Form $sender
-        Start-FormFadeIn -Form $sender -TargetOpacity 0.98
-        $sender.Activate()
+        try {
+            $state = $sender.Tag
+            Enable-WindowGlass -Form $sender
+            Start-FormFadeIn -Form $sender -TargetOpacity 0.98
+            if ([bool]$state.Sound) {
+                Play-ReminderSound -Strong ([bool]$state.Strong)
+            }
+            $sender.Activate()
+        }
+        catch {
+            Write-AppLog -Event 'PopupShownFailed' -Message $_.Exception.Message -Level 'ERROR'
+        }
     })
 
     $script:ActivePopup = $KeyName
@@ -2680,19 +3596,7 @@ function Test-ReminderDue {
         return $false
     }
 
-    if ($Now -lt $target) {
-        return $false
-    }
-
-    if ($Now -gt $target.AddMinutes(5)) {
-        return $false
-    }
-
-    if ($LastFiredDate -eq $Now.ToString('yyyy-MM-dd')) {
-        return $false
-    }
-
-    return $true
+    return (Test-ReminderReady -Now $Now -DueAt $target -LastFiredDate $LastFiredDate)
 }
 
 function Check-Reminders {
@@ -2702,10 +3606,20 @@ function Check-Reminders {
         return
     }
 
+    if (Test-TodayPauseActive) {
+        Update-MainStatus
+        return
+    }
+
     if ($script:Config.SnoozeReminder -and [bool]$script:Config.SnoozeReminder.Enabled) {
         $snoozeUntil = Get-SnoozeUntil
         if ($null -ne $snoozeUntil -and $now -ge $snoozeUntil) {
-            if (Show-ReminderPopup -TitleText $script:Config.SnoozeReminder.Title -MessageText $script:Config.SnoozeReminder.Message -KeyName $script:Config.SnoozeReminder.KeyName) {
+            if (Test-FocusShouldDelay -Now $now -DueAt $snoozeUntil) {
+                Update-MainStatus
+                return
+            }
+
+            if (Show-ReminderPopup -TitleText $script:Config.SnoozeReminder.Title -MessageText $script:Config.SnoozeReminder.Message -KeyName $script:Config.SnoozeReminder.KeyName -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'SnoozeFired' -Message ('贪睡提醒触发：{0}' -f $script:Config.SnoozeReminder.Title)
                 $script:Config.SnoozeReminder.Enabled = $false
                 $script:Config.SnoozeReminder.Until = $null
@@ -2722,9 +3636,39 @@ function Check-Reminders {
             continue
         }
 
-        if (Test-ReminderDue -Now $now -ReminderTime $item.Time -LastFiredDate $item.LastFiredDate) {
-            if (Show-ReminderPopup -TitleText $item.Title -MessageText $item.Message -KeyName $name) {
+        try {
+            $dueAt = Get-ScheduledDateTime -TimeText $item.Time
+        }
+        catch {
+            continue
+        }
+
+        if (Test-ReminderReady -Now $now -DueAt $dueAt -LastFiredDate $item.LastFiredDate) {
+            if (Show-ReminderPopup -TitleText $item.Title -MessageText $item.Message -KeyName $name -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'DailyFired' -Message ('{0} 提醒触发，计划时间 {1}' -f (Get-DailyReminderLabel -Name $name), $item.Time)
+                $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
+                Save-Config
+                Update-MainStatus
+                return
+            }
+        }
+    }
+
+    foreach ($item in (Get-CustomReminderList)) {
+        if (-not [bool]$item.Enabled) {
+            continue
+        }
+
+        try {
+            $dueAt = Get-ScheduledDateTime -TimeText $item.Time
+        }
+        catch {
+            continue
+        }
+
+        if (Test-ReminderReady -Now $now -DueAt $dueAt -LastFiredDate $item.LastFiredDate) {
+            if (Show-ReminderPopup -TitleText $item.Title -MessageText $item.Message -KeyName ('Custom:{0}' -f $item.Id) -Strong ([bool]$item.Strong) -Sound ([bool]$item.Sound)) {
+                Write-AppLog -Event 'CustomFired' -Message ('{0} 提醒触发，计划时间 {1}' -f $item.Title, $item.Time)
                 $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
                 Save-Config
                 Update-MainStatus
@@ -2736,8 +3680,8 @@ function Check-Reminders {
     $single = $script:Config.SingleReminder
     if ($single.Enabled -and -not $single.Triggered -and -not [string]::IsNullOrWhiteSpace($single.At)) {
         $when = ConvertTo-SingleReminderDateTime -At $single.At -BaseNow $now
-        if ($null -ne $when -and $now -ge $when -and $now -le $when.AddMinutes(5)) {
-            if (Show-ReminderPopup -TitleText $single.Label -MessageText $single.Message -KeyName 'Single') {
+        if ($null -ne $when -and (Test-ReminderReady -Now $now -DueAt $when -LastFiredDate $null)) {
+            if (Show-ReminderPopup -TitleText $single.Label -MessageText $single.Message -KeyName 'Single' -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'SingleFired' -Message ('单次提醒触发：{0}' -f (Format-SingleReminderDisplay -At $when))
                 $script:Config.SingleReminder.Triggered = $true
                 Save-Config
@@ -2963,6 +3907,17 @@ function Build-MainForm {
     $btnTest.FlatAppearance.BorderSize = 0
     $form.Controls.Add($btnTest)
 
+    $btnCustom = New-Object System.Windows.Forms.Button
+    $btnCustom.Text = '自定义'
+    $btnCustom.Size = New-Object System.Drawing.Size(102, 44)
+    $btnCustom.Location = New-Object System.Drawing.Point(358, 356)
+    $btnCustom.BackColor = $script:Colors.BlueSoft
+    $btnCustom.ForeColor = $script:Colors.Blue
+    $btnCustom.FlatStyle = 'Flat'
+    $btnCustom.FlatAppearance.BorderColor = $script:Colors.Border
+    $btnCustom.FlatAppearance.BorderSize = 1
+    $form.Controls.Add($btnCustom)
+
     $btnSettings = New-Object System.Windows.Forms.Button
     $btnSettings.Text = '设置'
     $btnSettings.Size = New-Object System.Drawing.Size(102, 44)
@@ -2983,6 +3938,17 @@ function Build-MainForm {
     $btnExit.FlatAppearance.BorderColor = $script:Colors.Border
     $btnExit.FlatAppearance.BorderSize = 1
     $form.Controls.Add($btnExit)
+
+    $btnPauseToday = New-Object System.Windows.Forms.Button
+    $btnPauseToday.Text = '今日暂停'
+    $btnPauseToday.Size = New-Object System.Drawing.Size(102, 34)
+    $btnPauseToday.Location = New-Object System.Drawing.Point(468, 414)
+    $btnPauseToday.BackColor = $script:Colors.OrangeSoft
+    $btnPauseToday.ForeColor = $script:Colors.Orange
+    $btnPauseToday.FlatStyle = 'Flat'
+    $btnPauseToday.FlatAppearance.BorderColor = $script:Colors.Border
+    $btnPauseToday.FlatAppearance.BorderSize = 1
+    $form.Controls.Add($btnPauseToday)
 
     $tip = New-Object System.Windows.Forms.Label
     $tip.Text = '关闭窗口会缩到系统托盘。'
@@ -3006,8 +3972,10 @@ function Build-MainForm {
         BtnCompany = $btnCompany
         BtnTrip = $btnTrip
         BtnTest = $btnTest
+        BtnCustom = $btnCustom
         BtnSettings = $btnSettings
         BtnExit = $btnExit
+        BtnPauseToday = $btnPauseToday
         Tip = $tip
     }
     Apply-MainTheme
@@ -3015,11 +3983,18 @@ function Build-MainForm {
     $btnCompany.Add_Click({ Set-Mode -Mode 'Company' })
     $btnTrip.Add_Click({ Set-Mode -Mode 'Trip' })
     $btnTest.Add_Click({
-        [void](Show-ReminderPopup -TitleText '测试弹窗' -MessageText '这是一个测试弹窗，用来确认界面和按钮效果。' -KeyName 'Test')
+        [void](Show-ReminderPopup -TitleText '测试弹窗' -MessageText '这是一个测试弹窗，用来确认界面和按钮效果。' -KeyName 'Test' -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled))
+    })
+    $btnCustom.Add_Click({
+        param($sender, $e)
+        Show-CustomRemindersDialog -OwnerForm $sender.FindForm()
     })
     $btnSettings.Add_Click({
         param($sender, $e)
         Show-SettingsDialog -OwnerForm $sender.FindForm()
+    })
+    $btnPauseToday.Add_Click({
+        Toggle-TodayPause
     })
     $btnExit.Add_Click({
         param($sender, $e)
@@ -3039,6 +4014,8 @@ function Build-MainForm {
             $miShow = $trayMenu.Items.Add('显示主界面')
             $miCompany = $trayMenu.Items.Add('公司上班')
             $miTrip = $trayMenu.Items.Add('出差中')
+            $miPauseToday = $trayMenu.Items.Add('今日暂停提醒')
+            $miCustom = $trayMenu.Items.Add('自定义提醒')
             $miSettings = $trayMenu.Items.Add('设置')
             [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
             $miExit = $trayMenu.Items.Add('退出')
@@ -3052,6 +4029,11 @@ function Build-MainForm {
             })
             $miCompany.Add_Click({ Set-Mode -Mode 'Company' })
             $miTrip.Add_Click({ Set-Mode -Mode 'Trip' })
+            $miPauseToday.Add_Click({ Toggle-TodayPause })
+            $miCustom.Add_Click({
+                Show-MainWindow
+                Show-CustomRemindersDialog -OwnerForm $script:MainForm
+            })
             $miSettings.Add_Click({
                 Show-MainWindow
                 Show-SettingsDialog -OwnerForm $script:MainForm
@@ -3061,10 +4043,12 @@ function Build-MainForm {
                 $script:TrayIcon.Visible = $false
                 $script:TrayIcon.Dispose()
                 $script:TrayIcon = $null
+                $script:TrayPauseTodayItem = $null
                 $script:MainForm.Close()
             })
 
             $script:TrayIcon.ContextMenuStrip = $trayMenu
+            $script:TrayPauseTodayItem = $miPauseToday
             $script:TrayIcon.Visible = $true
             $script:TrayIcon.Add_MouseClick({
                 param($sender, $e)
@@ -3122,6 +4106,7 @@ function Build-MainForm {
             $script:TrayIcon.Visible = $false
             $script:TrayIcon.Dispose()
             $script:TrayIcon = $null
+            $script:TrayPauseTodayItem = $null
         }
     })
 

@@ -1,8 +1,15 @@
-﻿{
-    "Version":  4,
+{
+    "Version":  7,
     "Mode":  "Company",
     "Preferences":  {
-                        "Theme":  "Pikachu"
+                        "Theme":  "Kuromi",
+                        "SoundEnabled":  false,
+                        "StrongPopup":  false,
+                        "FocusDoNotDisturb":  {
+                                                  "Enabled":  false,
+                                                  "IdleSeconds":  60,
+                                                  "MaxDelayMinutes":  10
+                                              }
                     },
     "SingleReminder":  {
                            "Enabled":  true,
@@ -19,6 +26,10 @@
                            "Message":  "晚上 20:57 到啦，今天可以收工了。",
                            "KeyName":  "Overtime"
                        },
+    "TodayPause":  {
+                       "Enabled":  false,
+                       "Until":  null
+                   },
     "DailyReminders":  {
                            "Lunch":  {
                                          "Enabled":  true,
@@ -41,5 +52,8 @@
                                             "Message":  "晚上 20:57 到啦，今天可以收工了。",
                                             "LastFiredDate":  "2026-06-02"
                                         }
-                       }
+                       },
+    "CustomReminders":  [
+
+                        ]
 }
