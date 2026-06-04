@@ -130,6 +130,9 @@ $script:ThemeImages = @{}
 $script:ThemeIcons = @{}
 $script:LastShowRequest = ''
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$script:TrayIconBlinkTimer = $null
+$script:TrayIconBlinkCount = 0
+$script:TrayIconBlinkMaxCount = 6
 
 $script:Colors = [ordered]@{
     Background = [System.Drawing.Color]::FromArgb(248, 250, 252)
@@ -3495,6 +3498,55 @@ function Update-TrayStats {
     $script:TrayIcon.Text = $text
 }
 
+function Start-TrayIconBlink {
+    if ($null -eq $script:TrayIcon) {
+        return
+    }
+
+    # 如果已经在闪烁，先停止
+    Stop-TrayIconBlink
+
+    $script:TrayIconBlinkCount = 0
+    $script:TrayIconBlinkTimer = New-Object System.Windows.Forms.Timer
+    $script:TrayIconBlinkTimer.Interval = 500
+    $script:TrayIconBlinkTimer.Add_Tick({
+        param($sender, $e)
+
+        $script:TrayIconBlinkCount++
+
+        # 交替显示图标和透明图标
+        if ($script:TrayIconBlinkCount % 2 -eq 1) {
+            # 显示透明图标
+            $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application
+        }
+        else {
+            # 显示正常图标
+            $script:TrayIcon.Icon = Get-AppIcon
+        }
+
+        # 达到最大闪烁次数后停止
+        if ($script:TrayIconBlinkCount -ge $script:TrayIconBlinkMaxCount) {
+            Stop-TrayIconBlink
+        }
+    })
+    $script:TrayIconBlinkTimer.Start()
+}
+
+function Stop-TrayIconBlink {
+    if ($null -ne $script:TrayIconBlinkTimer) {
+        $script:TrayIconBlinkTimer.Stop()
+        $script:TrayIconBlinkTimer.Dispose()
+        $script:TrayIconBlinkTimer = $null
+    }
+
+    # 恢复正常图标
+    if ($null -ne $script:TrayIcon) {
+        $script:TrayIcon.Icon = Get-AppIcon
+    }
+
+    $script:TrayIconBlinkCount = 0
+}
+
 function Show-MealStatsDialog {
     param([System.Windows.Forms.Form]$OwnerForm)
 
@@ -5661,6 +5713,7 @@ function Check-Reminders {
             $customMessage = if ($item.PSObject.Properties.Name -contains 'CustomMessage') { [string]$item.CustomMessage } else { '' }
             $popupMessage = Get-DailyReminderMessage -Name $name -TimeText $item.Time -MessageMode $messageMode -CustomMessage $customMessage
             $item.Message = $popupMessage
+            Start-TrayIconBlink
             if (Show-ReminderPopup -TitleText $item.Title -MessageText $popupMessage -KeyName $name -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'DailyFired' -Message ('{0} 提醒触发，计划时间 {1}' -f (Get-DailyReminderLabel -Name $name), $item.Time)
                 $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
@@ -5682,6 +5735,7 @@ function Check-Reminders {
         }
 
         if (Test-ReminderReady -Now $now -DueAt $dueAt -LastFiredDate $item.LastFiredDate) {
+            Start-TrayIconBlink
             if (Show-ReminderPopup -TitleText $item.Title -MessageText $item.Message -KeyName ('Custom:{0}' -f $item.Id) -Strong ([bool]$item.Strong) -Sound ([bool]$item.Sound)) {
                 Write-AppLog -Event 'CustomFired' -Message ('{0} 提醒触发，计划时间 {1}' -f $item.Title, $item.Time)
                 $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
@@ -5696,6 +5750,7 @@ function Check-Reminders {
     if ($single.Enabled -and -not $single.Triggered -and -not [string]::IsNullOrWhiteSpace($single.At)) {
         $when = ConvertTo-SingleReminderDateTime -At $single.At -BaseNow $now
         if ($null -ne $when -and (Test-ReminderReady -Now $now -DueAt $when -LastFiredDate $null)) {
+            Start-TrayIconBlink
             if (Show-ReminderPopup -TitleText $single.Label -MessageText $single.Message -KeyName 'Single' -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled)) {
                 Write-AppLog -Event 'SingleFired' -Message ('单次提醒触发：{0}' -f (Format-SingleReminderDisplay -At $when))
                 $script:Config.SingleReminder.Triggered = $true
@@ -6155,11 +6210,13 @@ function Build-MainForm {
             $script:TrayIcon.Visible = $true
             $script:TrayIcon.Add_MouseClick({
                 param($sender, $e)
+                Stop-TrayIconBlink
                 if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
                     Show-MainWindow
                 }
             })
             $script:TrayIcon.Add_DoubleClick({
+                Stop-TrayIconBlink
                 Show-MainWindow
             })
         }
