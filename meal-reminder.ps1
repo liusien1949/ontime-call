@@ -1842,6 +1842,7 @@ function Get-DefaultConfig {
                 MessageMode = 'Default'
                 CustomMessage = ''
                 LastFiredDate = $null
+                UsedRandomMessages = @()
             }
             Dinner = [pscustomobject]@{
                 Enabled = $true
@@ -1851,6 +1852,7 @@ function Get-DefaultConfig {
                 MessageMode = 'Default'
                 CustomMessage = ''
                 LastFiredDate = $null
+                UsedRandomMessages = @()
             }
             Overtime = [pscustomobject]@{
                 Enabled = $true
@@ -1860,6 +1862,7 @@ function Get-DefaultConfig {
                 MessageMode = 'Default'
                 CustomMessage = ''
                 LastFiredDate = $null
+                UsedRandomMessages = @()
             }
         }
         CustomReminders = @()
@@ -1975,7 +1978,7 @@ function Merge-Config {
     if ($Loaded.PSObject.Properties.Name -contains 'DailyReminders' -and $Loaded.DailyReminders) {
         foreach ($name in 'Lunch', 'Dinner', 'Overtime') {
             if ($Loaded.DailyReminders.PSObject.Properties.Name -contains $name) {
-                foreach ($prop in 'Enabled', 'Time', 'Title', 'Message', 'MessageMode', 'CustomMessage', 'LastFiredDate') {
+                foreach ($prop in 'Enabled', 'Time', 'Title', 'Message', 'MessageMode', 'CustomMessage', 'LastFiredDate', 'UsedRandomMessages') {
                     if ($Loaded.DailyReminders.$name.PSObject.Properties.Name -contains $prop) {
                         $default.DailyReminders.$name.$prop = $Loaded.DailyReminders.$name.$prop
                     }
@@ -2693,18 +2696,42 @@ function Get-DailyReminderRandomMessage {
         return (Get-DailyReminderMessage -Name $Name -TimeText $TimeText -MessageMode 'Default')
     }
 
-    $seedText = '{0}|{1}|{2}' -f (Get-Date).ToString('yyyy-MM-dd'), $Name, $TimeText
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($seedText)
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $hash = $sha256.ComputeHash($bytes)
-    }
-    finally {
-        $sha256.Dispose()
+    # 获取已使用的消息索引
+    $item = $script:Config.DailyReminders.$Name
+    $usedIndices = @()
+    if ($item.PSObject.Properties.Name -contains 'UsedRandomMessages') {
+        $usedIndices = @($item.UsedRandomMessages)
     }
 
-    $value = [System.BitConverter]::ToUInt32($hash, 0)
-    return $pool[[int]($value % [uint32]$pool.Count)]
+    # 过滤掉已使用的消息
+    $availableIndices = @()
+    for ($i = 0; $i -lt $pool.Count; $i++) {
+        if ($i -notin $usedIndices) {
+            $availableIndices += $i
+        }
+    }
+
+    # 如果所有消息都用完了，重置并从头开始
+    if ($availableIndices.Count -eq 0) {
+        $availableIndices = @()
+        for ($i = 0; $i -lt $pool.Count; $i++) {
+            $availableIndices += $i
+        }
+        $usedIndices = @()
+    }
+
+    # 随机选择一个
+    $random = New-Object System.Random
+    $selectedIndex = $availableIndices[$random.Next(0, $availableIndices.Count)]
+
+    # 记录已使用
+    $usedIndices += $selectedIndex
+    $item.UsedRandomMessages = $usedIndices
+
+    # 保存配置
+    Save-Config
+
+    return $pool[$selectedIndex]
 }
 
 function Get-DailyReminderTimeParts {
