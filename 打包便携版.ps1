@@ -1,12 +1,25 @@
 [CmdletBinding()]
 param(
-    [string]$OutputRoot = (Join-Path $PSScriptRoot 'dist'),
+    [string]$OutputRoot = '',
     [string]$PackageName = 'ontime-call-portable'
 )
 
 $ErrorActionPreference = 'Stop'
 
-$projectRoot = $PSScriptRoot
+$projectRoot = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $PSScriptRoot
+}
+elseif ($MyInvocation.MyCommand.Path) {
+    Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+else {
+    (Get-Location).Path
+}
+
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $OutputRoot = Join-Path $projectRoot 'dist'
+}
+
 $packageRoot = Join-Path $OutputRoot $PackageName
 $zipPath = Join-Path $OutputRoot ($PackageName + '.zip')
 
@@ -23,9 +36,9 @@ foreach ($file in $requiredFiles) {
     }
 }
 
-$launcher = Get-ChildItem -LiteralPath $projectRoot -Filter *.bat -File | Select-Object -First 1
-if ($null -eq $launcher) {
-    throw 'Missing launcher batch file.'
+$assetsRoot = Join-Path $projectRoot 'assets'
+if (-not (Test-Path -LiteralPath $assetsRoot -PathType Container)) {
+    throw 'Missing required directory: assets'
 }
 
 if (Test-Path -LiteralPath $packageRoot) {
@@ -40,9 +53,8 @@ New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 foreach ($file in $requiredFiles) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $packageRoot -Force
 }
-Copy-Item -LiteralPath $launcher.FullName -Destination $packageRoot -Force
 
-Copy-Item -LiteralPath (Join-Path $projectRoot 'assets') -Destination $packageRoot -Recurse -Force
+Copy-Item -LiteralPath $assetsRoot -Destination $packageRoot -Recurse -Force
 $cacheDir = Join-Path $packageRoot 'assets\themes\cache'
 if (Test-Path -LiteralPath $cacheDir) {
     Remove-Item -LiteralPath $cacheDir -Recurse -Force

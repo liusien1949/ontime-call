@@ -65,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -STA -File ".\meal-reminder.ps1"
 
 ### 界面美化
 - 🎨 **6 套主题** — 浅色 / 深色 / 库洛米 / 皮卡丘 / 线条小狗 / 猪猪侠
-- 🖼️ **自定义图标** — 6 个内置图标可选，或用你自己的 .ico 文件
+- 🖼️ **自定义图标** — 6 个内置图标可选，或用你自己的 .ico 文件；浅色模式自动匹配工牌打卡图标，深色模式匹配饭点闹钟图标
 - 📊 **吃饭统计** — 托盘提示文字显示"🍚 本周准点吃饭 5/7 天"，带周报弹窗
 
 ### 其他
@@ -111,9 +111,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -STA -File ".\meal-reminder.ps1"
 
 点击「自定义提醒」按钮打开管理窗口：
 - 左侧列表显示所有自定义提醒及其状态（待提醒 / 今日已提醒 / 已关闭）
-- 右侧编辑：时间（时/分）、标题、提醒内容
+- 右侧编辑：日期、时间、标题、提醒内容
 - 可单独控制每条提醒的启用/禁用、声音开关、强提醒
 - 支持新增、保存、删除
+- **批量删除** — 勾选多条提醒一键删除，支持全选/取消全选
+- **快捷模板** — 会议、喝水、下班、吃药、脚本，一键套用后按保存生效
 
 ---
 
@@ -147,7 +149,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -STA -File ".\meal-reminder.ps1"
 
 ```text
 ontime-call/
-├── meal-reminder.ps1          # 主程序（6232 行 PowerShell + Windows Forms）
+├── meal-reminder.ps1          # 主程序（6968 行 PowerShell + Windows Forms）
 ├── meal-reminder.vbs          # VBS 静默启动入口，双击此文件即可运行
 ├── 打包便携版.ps1              # 便携版打包脚本
 ├── README.md

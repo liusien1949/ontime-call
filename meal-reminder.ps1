@@ -95,6 +95,37 @@ public static class UserIdleTracker
 '@
 }
 
+if (-not ('AppNoFocusButton' -as [type])) {
+    Add-Type -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing' -TypeDefinition @'
+using System;
+using System.Windows.Forms;
+
+public class AppNoFocusButton : Button
+{
+    public AppNoFocusButton()
+    {
+        TabStop = false;
+        SetStyle(ControlStyles.Selectable, false);
+    }
+
+    protected override bool ShowFocusCues
+    {
+        get { return false; }
+    }
+
+    protected override bool ShowKeyboardCues
+    {
+        get { return false; }
+    }
+
+    public override void NotifyDefault(bool value)
+    {
+        base.NotifyDefault(false);
+    }
+}
+'@
+}
+
 Set-StrictMode -Version Latest
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
@@ -116,6 +147,7 @@ $script:Config = $null
 $script:MainForm = $null
 $script:TrayIcon = $null
 $script:TrayPauseTodayItem = $null
+$script:TrayNextReminderItem = $null
 $script:StatusLabel = $null
 $script:DetailLabel = $null
 $script:ClockLabel = $null
@@ -135,6 +167,7 @@ $script:TrayIconBlinkCount = 0
 $script:TrayIconBlinkMaxCount = 6
 $script:TrayIconOriginalIcon = $null
 $script:TrayIconBlankIcon = $null
+$script:ButtonFocusHandlers = @{}
 
 $script:Colors = [ordered]@{
     Background = [System.Drawing.Color]::FromArgb(248, 250, 252)
@@ -755,7 +788,18 @@ function Get-ThemeIcon {
     param([object]$Theme)
 
     $themeMode = Get-ThemeMode -Value $Theme
-    if ($themeMode -eq 'Light' -or $themeMode -eq 'Dark') {
+    if ($themeMode -eq 'Light') {
+        $path = Get-BuiltInIconPath -Key 'work-badge'
+        if ($path) {
+            return (Get-IconFromFile -Path $path -CacheKey 'theme:Light')
+        }
+        return [System.Drawing.SystemIcons]::Information
+    }
+    if ($themeMode -eq 'Dark') {
+        $path = Get-BuiltInIconPath -Key 'meal-clock'
+        if ($path) {
+            return (Get-IconFromFile -Path $path -CacheKey 'theme:Dark')
+        }
         return [System.Drawing.SystemIcons]::Information
     }
 
@@ -962,6 +1006,39 @@ function Enable-WindowGlass {
     Apply-AppButtonChrome -Root $Form
 }
 
+function Disable-ButtonFocusFrame {
+    param([System.Windows.Forms.Button]$Button)
+
+    if ($null -eq $Button -or $Button.IsDisposed) {
+        return
+    }
+
+    $Button.TabStop = $false
+
+    $key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Button)
+    if ($script:ButtonFocusHandlers.ContainsKey($key)) {
+        return
+    }
+
+    $clearFocus = {
+        param($sender, $e)
+
+        if ($null -eq $sender -or $sender.IsDisposed -or $null -eq $sender.Parent -or $sender.Parent.IsDisposed) {
+            return
+        }
+
+        try {
+            [void]$sender.Parent.Focus()
+        }
+        catch {
+        }
+    }
+
+    $Button.Add_MouseUp($clearFocus)
+    $Button.Add_GotFocus($clearFocus)
+    $script:ButtonFocusHandlers[$key] = $true
+}
+
 function Apply-AppButtonChrome {
     param([System.Windows.Forms.Control]$Root)
 
@@ -976,6 +1053,7 @@ function Apply-AppButtonChrome {
             $control.Cursor = [System.Windows.Forms.Cursors]::Hand
             $control.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Regular)
             $control.Padding = New-Object System.Windows.Forms.Padding(0)
+            Disable-ButtonFocusFrame -Button $control
             if ($control.FlatAppearance.BorderSize -le 0) {
                 $control.FlatAppearance.BorderSize = 1
             }
@@ -1154,6 +1232,7 @@ function Set-ButtonStyle {
     $Button.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Regular)
     $Button.Padding = New-Object System.Windows.Forms.Padding(0)
     $Button.Cursor = [System.Windows.Forms.Cursors]::Hand
+    Disable-ButtonFocusFrame -Button $Button
 }
 
 function Set-AnimatedButtonStyle {
@@ -1293,7 +1372,7 @@ function Apply-AppMenuTheme {
         if ($item -is [System.Windows.Forms.ToolStripMenuItem]) {
             $item.AutoSize = $false
             $item.Height = 34
-            $item.Width = 142
+            $item.Width = if ($item.Name -eq 'NextReminder') { 280 } else { 142 }
             $item.Padding = New-Object System.Windows.Forms.Padding(14, 0, 14, 0)
             $item.DisplayStyle = [System.Windows.Forms.ToolStripItemDisplayStyle]::Text
         }
@@ -1320,7 +1399,7 @@ function Apply-MainTheme {
     Update-GlassPanel -Control $c.ClockPanel -Radius 18 -FillAlpha 150
     Update-GlassPanel -Control $c.Card -Radius 22 -FillAlpha 162
 
-    foreach ($label in @($c.Title, $c.Subtitle, $c.ThemeBadge, $c.Tip)) {
+    foreach ($label in @($c.Title, $c.ThemeBadge, $c.Tip)) {
         if ($label) {
             $label.BackColor = $script:Colors.Background
         }
@@ -1346,7 +1425,6 @@ function Apply-MainTheme {
     }
 
     $c.Title.ForeColor = $script:Colors.Text
-    $c.Subtitle.ForeColor = $script:Colors.Muted
     $c.ThemeBadge.Text = Get-ThemeElementText -Value $script:Config.Preferences.Theme
     $c.ThemeBadge.ForeColor = $script:Colors.Purple
     if ($c.ThemeIcon) {
@@ -1362,47 +1440,18 @@ function Apply-MainTheme {
     $c.ClockCaption.ForeColor = $script:Colors.Muted
     $script:ClockLabel.ForeColor = $script:Colors.Blue
     $script:ClockDateLabel.ForeColor = $script:Colors.Muted
-    $c.StatusTitle.ForeColor = $script:Colors.Text
-    $script:StatusLabel.ForeColor = $script:Colors.Blue
+    if ($c.StatusTitle) {
+        $c.StatusTitle.ForeColor = $script:Colors.Text
+    }
+    if ($script:StatusLabel) {
+        $script:StatusLabel.ForeColor = $script:Colors.Blue
+    }
     $script:DetailLabel.ForeColor = $script:Colors.Muted
     $c.Tip.ForeColor = $script:Colors.Muted
 
     $neutralBack = Blend-Color -From $script:Colors.Surface -To $script:Colors.Background -Amount 0.25
     $neutralHover = Blend-Color -From $neutralBack -To $script:Colors.Border -Amount 0.55
     $neutralPress = Blend-Color -From $neutralBack -To $script:Colors.Border -Amount 0.82
-    $white = [System.Drawing.Color]::White
-    $black = [System.Drawing.Color]::Black
-    $companyActive = ($script:Config.Mode -eq 'Company')
-    $tripActive = ($script:Config.Mode -eq 'Trip')
-    $companyBack = if ($companyActive) { $script:Colors.Blue } else { $neutralBack }
-    $companyFore = if ($companyActive) { $white } else { $script:Colors.Text }
-    $companyHover = if ($companyActive) { Blend-Color -From $script:Colors.Blue -To $white -Amount 0.12 } else { $neutralHover }
-    $companyPress = if ($companyActive) { Blend-Color -From $script:Colors.Blue -To $black -Amount 0.10 } else { $neutralPress }
-    $tripBack = if ($tripActive) { $script:Colors.Orange } else { $neutralBack }
-    $tripFore = if ($tripActive) { $white } else { $script:Colors.Text }
-    $tripHover = if ($tripActive) { Blend-Color -From $script:Colors.Orange -To $white -Amount 0.12 } else { $neutralHover }
-    $tripPress = if ($tripActive) { Blend-Color -From $script:Colors.Orange -To $black -Amount 0.10 } else { $neutralPress }
-    $companyBorder = if ($companyActive) { $script:Colors.Blue } else { $script:Colors.Border }
-    $tripBorder = if ($tripActive) { $script:Colors.Orange } else { $script:Colors.Border }
-
-    Set-AnimatedButtonStyle -Button $c.BtnCompany `
-        -BaseBack $companyBack `
-        -BaseFore $companyFore `
-        -HoverBack $companyHover `
-        -PressBack $companyPress `
-        -BorderColor $companyBorder
-    Set-AnimatedButtonStyle -Button $c.BtnTrip `
-        -BaseBack $tripBack `
-        -BaseFore $tripFore `
-        -HoverBack $tripHover `
-        -PressBack $tripPress `
-        -BorderColor $tripBorder
-    Set-AnimatedButtonStyle -Button $c.BtnTest `
-        -BaseBack $neutralBack `
-        -BaseFore $script:Colors.Text `
-        -HoverBack $neutralHover `
-        -PressBack $neutralPress `
-        -BorderColor $script:Colors.Border
     Set-AnimatedButtonStyle -Button $c.BtnCustom `
         -BaseBack $neutralBack `
         -BaseFore $script:Colors.Text `
@@ -1514,8 +1563,7 @@ function Apply-MainThemeLayout {
         $c.ThemeBanner.Size = New-MainLayoutSize 660 86
         $c.ThemeIcon.Location = New-MainLayoutPoint 28 108
         $c.ClockPanel.Location = New-MainLayoutPoint 478 110
-        $c.Subtitle.Location = New-MainLayoutPoint 108 118
-        $c.ThemeBadge.Location = New-MainLayoutPoint 108 146
+        $c.ThemeBadge.Location = New-MainLayoutPoint 108 118
         $cardY = 182
         $cardH = 216
         $buttonY = 422
@@ -1526,8 +1574,7 @@ function Apply-MainThemeLayout {
         $c.ThemeBanner.Size = New-MainLayoutSize 310 22
         $c.ThemeIcon.Location = New-MainLayoutPoint 28 26
         $c.ClockPanel.Location = New-MainLayoutPoint 478 28
-        $c.Subtitle.Location = New-MainLayoutPoint 108 38
-        $c.ThemeBadge.Location = New-MainLayoutPoint 108 66
+        $c.ThemeBadge.Location = New-MainLayoutPoint 108 38
         $cardY = 112
         $cardH = 220
         $buttonY = 356
@@ -1541,17 +1588,17 @@ function Apply-MainThemeLayout {
     $scaledCardH = $c.Card.Height
 
     if ($script:StatusLabel) {
-        $script:StatusLabel.Location = New-MainScaledPoint 20 48
+        $script:StatusLabel.Location = New-MainScaledPoint 20 18
         Set-MainLayoutFont -Control $script:StatusLabel -Size 12
     }
     if ($script:DetailLabel) {
-        $script:DetailLabel.Location = New-MainScaledPoint 20 ($cardH - 42)
+        $script:DetailLabel.Location = New-MainScaledPoint 20 ($cardH - 32)
         $script:DetailLabel.Size = New-MainLayoutSize 620 28
         Set-MainLayoutFont -Control $script:DetailLabel -Size 10
     }
 
     if ($script:DailyReminderRows) {
-        $rowTops = @(82, 112, 142)
+        $rowTops = @(74, 104, 134)
         $index = 0
         foreach ($name in 'Lunch', 'Dinner', 'Overtime') {
             if (-not $script:DailyReminderRows.ContainsKey($name)) {
@@ -1573,14 +1620,11 @@ function Apply-MainThemeLayout {
         }
     }
 
-    $c.BtnCompany.Location = New-MainLayoutPoint 28 $buttonY
-    $c.BtnTrip.Location = New-MainLayoutPoint 138 $buttonY
-    $c.BtnTest.Location = New-MainLayoutPoint 248 $buttonY
-    $c.BtnCustom.Location = New-MainLayoutPoint 358 $buttonY
-    foreach ($button in @($c.BtnCompany, $c.BtnTrip, $c.BtnTest, $c.BtnCustom)) {
+    $c.BtnCustom.Location = New-MainLayoutPoint 602 $buttonY
+    foreach ($button in @($c.BtnCustom)) {
         if ($button) {
-            $button.Size = New-MainLayoutSize 102 44
-            Set-MainLayoutFont -Control $button -Size 9
+            $button.Size = New-MainLayoutSize 86 34
+            Set-MainLayoutFont -Control $button -Size 8.6
         }
     }
 
@@ -1591,9 +1635,6 @@ function Apply-MainThemeLayout {
     if ($c.Title) {
         $c.Title.Location = if ($usesWideBanner) { New-MainLayoutPoint 108 92 } else { New-MainLayoutPoint 28 30 }
         Set-MainLayoutFont -Control $c.Title -Size 22 -Style ([System.Drawing.FontStyle]::Bold)
-    }
-    if ($c.Subtitle) {
-        Set-MainLayoutFont -Control $c.Subtitle -Size 9
     }
     if ($c.ThemeBadge) {
         Set-MainLayoutFont -Control $c.ThemeBadge -Size 9.5 -Style ([System.Drawing.FontStyle]::Bold)
@@ -2068,6 +2109,16 @@ function Merge-Config {
                 $soundValue = [bool]$item.Sound
             }
 
+            $repeatMinutesValue = 0
+            if ($item.PSObject.Properties.Name -contains 'RepeatMinutes') {
+                try {
+                    $repeatMinutesValue = [Math]::Max(0, [int]$item.RepeatMinutes)
+                }
+                catch {
+                    $repeatMinutesValue = 0
+                }
+            }
+
             $customItems.Add([pscustomobject]@{
                 Id = $idText
                 Enabled = $enabledValue
@@ -2078,6 +2129,7 @@ function Merge-Config {
                 LastFiredDate = $lastFiredValue
                 Strong = $strongValue
                 Sound = $soundValue
+                RepeatMinutes = $repeatMinutesValue
             })
         }
         $default.CustomReminders = @($customItems)
@@ -2342,7 +2394,7 @@ function Set-SnoozeReminder {
     $script:Config.SnoozeReminder.KeyName = $KeyName
     Save-Config
     Update-MainStatus
-    Write-AppLog -Event 'SnoozeSet' -Message ('{0} 贪睡 {1} 分钟，到 {2:yyyy-MM-dd HH:mm:ss}' -f $TitleText, $Minutes, $until)
+    Write-AppLog -Event 'SnoozeSet' -Message ('Key={0} | {1} 贪睡 {2} 分钟，到 {3:yyyy-MM-dd HH:mm:ss}' -f $KeyName, $TitleText, $Minutes, $until)
     Show-Toast -Message ('已贪睡 {0} 分钟，{1:HH:mm} 再提醒' -f $Minutes, $until) -Accent $script:Colors.Orange
 }
 
@@ -2907,7 +2959,7 @@ function Show-DailyReminderMessageDialog {
     $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
     $dialog.Controls.Add($error)
 
-    $saveBtn = New-Object System.Windows.Forms.Button
+    $saveBtn = New-Object AppNoFocusButton
     $saveBtn.Text = '保存'
     $saveBtn.Size = New-Object System.Drawing.Size(92, 34)
     $saveBtn.Location = New-Object System.Drawing.Point(252, 276)
@@ -2917,7 +2969,7 @@ function Show-DailyReminderMessageDialog {
     $saveBtn.FlatAppearance.BorderSize = 0
     $dialog.Controls.Add($saveBtn)
 
-    $cancelBtn = New-Object System.Windows.Forms.Button
+    $cancelBtn = New-Object AppNoFocusButton
     $cancelBtn.Text = '取消'
     $cancelBtn.Size = New-Object System.Drawing.Size(92, 34)
     $cancelBtn.Location = New-Object System.Drawing.Point(352, 276)
@@ -3161,7 +3213,8 @@ function New-CustomReminder {
         [string]$Message = '你设置的自定义提醒时间到了。',
         [bool]$Enabled = $true,
         [bool]$Strong = $false,
-        [bool]$Sound = $false
+        [bool]$Sound = $false,
+        [int]$RepeatMinutes = 0
     )
 
     $atText = $null
@@ -3183,6 +3236,22 @@ function New-CustomReminder {
         LastFiredDate = $null
         Strong = $Strong
         Sound = $Sound
+        RepeatMinutes = [Math]::Max(0, $RepeatMinutes)
+    }
+}
+
+function Get-CustomReminderRepeatMinutes {
+    param([object]$Item)
+
+    if ($null -eq $Item -or -not ($Item.PSObject.Properties.Name -contains 'RepeatMinutes')) {
+        return 0
+    }
+
+    try {
+        return [Math]::Max(0, [int]$Item.RepeatMinutes)
+    }
+    catch {
+        return 0
     }
 }
 
@@ -3251,6 +3320,7 @@ function Get-CustomReminderDisplayText {
     }
 
     $dueAt = Get-CustomReminderDueAt -Item $Item
+    $repeatMinutes = Get-CustomReminderRepeatMinutes -Item $Item
     $timeText = if ($null -ne $dueAt -and (Get-CustomReminderAtDateTime -Item $Item)) {
         Format-CustomReminderAtText -At $dueAt
     }
@@ -3261,7 +3331,8 @@ function Get-CustomReminderDisplayText {
         ''
     }
 
-    return ('{0}  {1}  [{2}]' -f $timeText, $Item.Title, $state)
+    $repeatText = if ($repeatMinutes -gt 0) { '  循环{0}分钟' -f $repeatMinutes } else { '' }
+    return ('{0}  {1}{2}  [{3}]' -f $timeText, $Item.Title, $repeatText, $state)
 }
 
 function Get-NextCustomText {
@@ -3294,6 +3365,130 @@ function Get-NextCustomText {
             }
     )
     return ('自定义：{0}个开启，最近 {1}' -f $enabledCount, ($nextItems -join '、'))
+}
+
+function Format-ReminderRemaining {
+    param(
+        [datetime]$DueAt,
+        [datetime]$Now = ([datetime]::Now)
+    )
+
+    $span = $DueAt - $Now
+    if ($span.TotalSeconds -le 0) {
+        return '现在'
+    }
+
+    $days = [int][Math]::Floor($span.TotalDays)
+    $hours = $span.Hours
+    $minutes = [Math]::Max(0, [int][Math]::Ceiling($span.Minutes + ($span.Seconds / 60.0)))
+    if ($minutes -ge 60) {
+        $hours++
+        $minutes = 0
+    }
+
+    if ($days -gt 0) {
+        return ('{0}天{1}小时' -f $days, $hours)
+    }
+    if ($hours -gt 0) {
+        return ('{0}小时{1}分钟' -f $hours, $minutes)
+    }
+    return ('{0}分钟' -f $minutes)
+}
+
+function Get-NextReminderInfo {
+    param([datetime]$Now = ([datetime]::Now))
+
+    if ($null -eq $script:Config) {
+        return '下一个：配置未加载'
+    }
+
+    if ($script:Config.Mode -eq 'Trip') {
+        return '下一个：出差中，全部提醒已暂停'
+    }
+
+    if (Test-TodayPauseActive) {
+        return '下一个：今日已暂停'
+    }
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+
+    if (Test-SnoozeActive -Now $Now) {
+        $until = Get-SnoozeUntil
+        if ($null -ne $until) {
+            $title = if ([string]::IsNullOrWhiteSpace([string]$script:Config.SnoozeReminder.Title)) { '贪睡提醒' } else { [string]$script:Config.SnoozeReminder.Title }
+            $candidates.Add([pscustomobject]@{ Title = $title; DueAt = $until })
+        }
+    }
+
+    foreach ($name in 'Lunch', 'Dinner', 'Overtime') {
+        $item = $script:Config.DailyReminders.$name
+        if (-not [bool]$item.Enabled) {
+            continue
+        }
+
+        for ($offset = 0; $offset -le 14; $offset++) {
+            $date = $Now.Date.AddDays($offset)
+            if (-not (Test-WorkDate -Date $date)) {
+                continue
+            }
+
+            if ($offset -eq 0 -and $item.LastFiredDate -eq $Now.ToString('yyyy-MM-dd')) {
+                continue
+            }
+
+            try {
+                $dueAt = $date.Add((Get-TimeOfDay -Value ([string]$item.Time)))
+            }
+            catch {
+                break
+            }
+
+            if ($dueAt -gt $Now) {
+                $candidates.Add([pscustomobject]@{ Title = (Get-DailyReminderLabel -Name $name); DueAt = $dueAt })
+                break
+            }
+        }
+    }
+
+    foreach ($item in (Get-CustomReminderList)) {
+        if (-not [bool]$item.Enabled) {
+            continue
+        }
+
+        $dueAt = Get-CustomReminderDueAt -Item $item
+        if ($null -eq $dueAt) {
+            continue
+        }
+
+        if ($null -ne (Get-CustomReminderAtDateTime -Item $item)) {
+            if ($dueAt -le $Now -or $item.LastFiredDate -eq $dueAt.ToString('yyyy-MM-dd')) {
+                continue
+            }
+        }
+        else {
+            if ($dueAt -le $Now -or $item.LastFiredDate -eq $Now.ToString('yyyy-MM-dd')) {
+                $dueAt = $dueAt.AddDays(1)
+            }
+        }
+
+        $candidates.Add([pscustomobject]@{ Title = [string]$item.Title; DueAt = $dueAt })
+    }
+
+    $single = $script:Config.SingleReminder
+    if ($single.Enabled -and -not $single.Triggered -and -not [string]::IsNullOrWhiteSpace([string]$single.At)) {
+        $dueAt = ConvertTo-SingleReminderDateTime -At $single.At -BaseNow $Now
+        if ($null -ne $dueAt -and $dueAt -gt $Now) {
+            $title = if ([string]::IsNullOrWhiteSpace([string]$single.Label)) { '单次提醒' } else { [string]$single.Label }
+            $candidates.Add([pscustomobject]@{ Title = $title; DueAt = $dueAt })
+        }
+    }
+
+    $next = $candidates | Sort-Object DueAt | Select-Object -First 1
+    if ($null -eq $next) {
+        return '下一个：暂无待触发提醒'
+    }
+
+    return ('下一个：{0} {1}，剩余 {2}' -f $next.Title, $next.DueAt.ToString('HH:mm'), (Format-ReminderRemaining -DueAt $next.DueAt -Now $Now))
 }
 
 function Get-MealStats {
@@ -3356,7 +3551,8 @@ function Get-MealStats {
     $recordDates = New-Object 'System.Collections.Generic.HashSet[string]'
     $snoozeCount = 0
     $dailyPattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+DailyFired\s+-\s+(午饭|晚饭)\s+'
-    $snoozePattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+SnoozeSet\s+-\s+.*(午饭|晚饭)'
+    $snoozeKeyPattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+SnoozeSet\s+-\s+.*Key=(Lunch|Dinner)(\s|\||$)'
+    $snoozeLegacyPattern = '^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+\[INFO\]\s+SnoozeSet\s+-\s+(?!.*Key=).*(午饭|晚饭)'
 
     foreach ($line in ($logText -split "\r\n|\n|\r")) {
         if ($line -match $dailyPattern) {
@@ -3379,7 +3575,7 @@ function Get-MealStats {
                 [void]$dinnerDates.Add($Matches[1])
             }
         }
-        elseif ($line -match $snoozePattern) {
+        elseif (($line -match $snoozeKeyPattern) -or ($line -match $snoozeLegacyPattern)) {
             try {
                 $logDate = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
             }
@@ -3498,6 +3694,10 @@ function Update-TrayStats {
     }
 
     $baseText = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme
+    if ($script:TrayNextReminderItem) {
+        $script:TrayNextReminderItem.Text = Get-NextReminderInfo
+    }
+
     $stats = Get-MealStats
     if ([string]::IsNullOrWhiteSpace($stats.DisplayString)) {
         $script:TrayIcon.Text = $baseText
@@ -3702,10 +3902,10 @@ function Show-MealStatsDialog {
     $hint.Location = New-Object System.Drawing.Point(28, 438)
     $hint.Size = New-Object System.Drawing.Size(410, 38)
     $hint.ForeColor = $script:Colors.Muted
-    $hint.Text = '口径：本周已到统计范围的工作日内，饭点触发且未点推延算准点；点推延算不准点。'
+    $hint.Text = '口径：仅饭点提醒的推延计入不准点；自定义、单次和测试提醒推延不参与准点判定。'
     $dialog.Controls.Add($hint)
 
-    $closeBtn = New-Object System.Windows.Forms.Button
+    $closeBtn = New-Object AppNoFocusButton
     $closeBtn.Text = '关闭'
     $closeBtn.Size = New-Object System.Drawing.Size(100, 36)
     $closeBtn.Location = New-Object System.Drawing.Point(488, 448)
@@ -3962,7 +4162,7 @@ function Show-FocusDoNotDisturbDialog {
     $minuteLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($minuteLabel)
 
-    $ok = New-Object System.Windows.Forms.Button
+    $ok = New-Object AppNoFocusButton
     $ok.Text = '保存'
     $ok.Size = New-Object System.Drawing.Size(96, 36)
     $ok.Location = New-Object System.Drawing.Point(206, 170)
@@ -3972,7 +4172,7 @@ function Show-FocusDoNotDisturbDialog {
     $ok.FlatAppearance.BorderSize = 0
     $dialog.Controls.Add($ok)
 
-    $cancel = New-Object System.Windows.Forms.Button
+    $cancel = New-Object AppNoFocusButton
     $cancel.Text = '取消'
     $cancel.Size = New-Object System.Drawing.Size(96, 36)
     $cancel.Location = New-Object System.Drawing.Point(310, 170)
@@ -4170,7 +4370,7 @@ function Show-WorkScheduleDialog {
     $bigSunday.Add_Click({ $bigSmall.Checked = $true })
     & $updatePreview
 
-    $saveBtn = New-Object System.Windows.Forms.Button
+    $saveBtn = New-Object AppNoFocusButton
     $saveBtn.Text = '保存'
     $saveBtn.Size = New-Object System.Drawing.Size(96, 36)
     $saveBtn.Location = New-Object System.Drawing.Point(248, 304)
@@ -4180,7 +4380,7 @@ function Show-WorkScheduleDialog {
     $saveBtn.FlatAppearance.BorderSize = 0
     $dialog.Controls.Add($saveBtn)
 
-    $cancel = New-Object System.Windows.Forms.Button
+    $cancel = New-Object AppNoFocusButton
     $cancel.Text = '取消'
     $cancel.Size = New-Object System.Drawing.Size(96, 36)
     $cancel.Location = New-Object System.Drawing.Point(352, 304)
@@ -4261,10 +4461,14 @@ function Show-CustomRemindersDialog {
     $dialog.FormBorderStyle = 'FixedDialog'
     $dialog.MaximizeBox = $false
     $dialog.MinimizeBox = $false
-    $dialog.ClientSize = New-Object System.Drawing.Size(680, 560)
+    $dialog.ClientSize = New-Object System.Drawing.Size(760, 620)
     $dialog.BackColor = $script:Colors.Background
     $dialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
     $dialog.Opacity = 0
+    $dialog.Tag = [pscustomobject]@{
+        RepeatMinutes = 0
+        SelectedTemplate = $null
+    }
 
     $title = New-Object System.Windows.Forms.Label
     $title.Text = '自定义提醒'
@@ -4275,17 +4479,176 @@ function Show-CustomRemindersDialog {
     $dialog.Controls.Add($title)
 
     $list = New-Object System.Windows.Forms.ListBox
-    $list.Location = New-Object System.Drawing.Point(24, 58)
-    $list.Size = New-Object System.Drawing.Size(292, 346)
+    $list.Location = New-Object System.Drawing.Point(24, 86)
+    $list.Size = New-Object System.Drawing.Size(292, 318)
     $list.BackColor = $script:Colors.Surface
     $list.ForeColor = $script:Colors.Text
     $list.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $dialog.Controls.Add($list)
 
+    $templateLabel = New-Object System.Windows.Forms.Label
+    $templateLabel.Text = '模板'
+    $templateLabel.AutoSize = $true
+    $templateLabel.Location = New-Object System.Drawing.Point(346, 58)
+    $templateLabel.ForeColor = $script:Colors.Muted
+    $dialog.Controls.Add($templateLabel)
+
+    $templateButtons = @(
+        [pscustomobject]@{ Text = '会议'; Title = '会议提醒'; Message = '会议时间到了，准备进入会议。'; Hour = 0; Minute = 30; Mode = 'Relative'; Next = @(10, 15, 30, 60); Repeat = @(0) },
+        [pscustomobject]@{ Text = '喝水'; Title = '喝水提醒'; Message = '该喝水了，起来活动一下。'; Hour = 0; Minute = 45; Mode = 'Relative'; Next = @(15, 30, 45, 60); Repeat = @(30, 45, 60, 90) },
+        [pscustomobject]@{ Text = '下班'; Title = '下班提醒'; Message = '到点了，收尾一下准备下班。'; Hour = 18; Minute = 0; Mode = 'ClockTime'; Next = @(30, 60, 90); Repeat = @(0) },
+        [pscustomobject]@{ Text = '吃药'; Title = '吃药提醒'; Message = '该吃药了，别忘了喝水。'; Hour = 12; Minute = 30; Mode = 'ClockTime'; Next = @(15, 30, 60); Repeat = @(240, 360, 480, 720) },
+        [pscustomobject]@{ Text = '脚本'; Title = '脚本提醒'; Message = '该检查并运行脚本了。'; Hour = 9; Minute = 0; Mode = 'ClockTime'; Next = @(15, 30, 60, 120); Repeat = @(30, 60, 120, 240) }
+    )
+    $templateLeft = 386
+    foreach ($template in $templateButtons) {
+        $templateBtn = New-Object AppNoFocusButton
+        $templateBtn.Text = $template.Text
+        $templateBtn.Size = New-Object System.Drawing.Size(58, 26)
+        $templateBtn.Location = New-Object System.Drawing.Point($templateLeft, 53)
+        $templateBtn.BackColor = $script:Colors.Surface
+        $templateBtn.ForeColor = $script:Colors.Text
+        $templateBtn.FlatStyle = 'Flat'
+        $templateBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $templateBtn.FlatAppearance.BorderSize = 1
+        $templateBtn.Tag = $template
+        $dialog.Controls.Add($templateBtn)
+        $templateBtn.Add_Click({
+            param($sender, $e)
+            $data = $sender.Tag
+            $list.ClearSelected()
+            $nameBox.Text = [string]$data.Title
+            $messageBox.Text = [string]$data.Message
+            $enabled.Checked = $true
+            $sound.Checked = $false
+            $strong.Checked = $false
+            $baseNow = [datetime]::Now
+            $candidate = if ([string]$data.Mode -eq 'ClockTime') {
+                Get-SingleReminderCandidate -Hour ([int]$data.Hour) -Minute ([int]$data.Minute) -ScheduleMode 'ClockTime' -BaseNow $baseNow
+            }
+            else {
+                Get-SingleReminderCandidate -Hour ([int]$data.Hour) -Minute ([int]$data.Minute) -ScheduleMode 'Relative' -BaseNow $baseNow
+            }
+            $dateBox.Value = $candidate.Date
+            $timeBox.Value = [datetime]::Today.Add($candidate.TimeOfDay)
+            $sender.FindForm().Tag.RepeatMinutes = 0
+            & $showTemplateOptions -Template $data
+            $error.Text = '已套用模板，确认时间后按保存将添加提醒。'
+        })
+        $templateLeft += 70
+    }
+
+    $formatQuickMinutes = {
+        param([int]$Minutes)
+        if ($Minutes -ge 60 -and ($Minutes % 60) -eq 0) {
+            return ('{0}小时' -f [int]($Minutes / 60))
+        }
+        return ('{0}分' -f $Minutes)
+    }
+
+    $nextQuickLabel = New-Object System.Windows.Forms.Label
+    $nextQuickLabel.Text = '下一次'
+    $nextQuickLabel.AutoSize = $true
+    $nextQuickLabel.Location = New-Object System.Drawing.Point(346, 88)
+    $nextQuickLabel.ForeColor = $script:Colors.Muted
+    $nextQuickLabel.Visible = $false
+    $dialog.Controls.Add($nextQuickLabel)
+
+    $repeatQuickLabel = New-Object System.Windows.Forms.Label
+    $repeatQuickLabel.Text = '循环'
+    $repeatQuickLabel.AutoSize = $true
+    $repeatQuickLabel.Location = New-Object System.Drawing.Point(346, 118)
+    $repeatQuickLabel.ForeColor = $script:Colors.Muted
+    $repeatQuickLabel.Visible = $false
+    $dialog.Controls.Add($repeatQuickLabel)
+
+    $quickButtonHandler = {
+        param($sender, $e)
+        $data = $sender.Tag
+        $minutes = [int]$data.Minutes
+        $isRepeat = [bool]$data.Repeat
+        $candidate = ([datetime]::Now).AddMinutes($minutes)
+        $dateBox.Value = $candidate.Date
+        $timeBox.Value = [datetime]::Today.Add($candidate.TimeOfDay)
+        $sender.FindForm().Tag.RepeatMinutes = if ($isRepeat) { $minutes } else { 0 }
+        $error.Text = if ($isRepeat) {
+            ('已设置循环：每 {0} 提醒一次，按保存将添加提醒。' -f (& $formatQuickMinutes $minutes))
+        }
+        else {
+            ('已设置下一次：{0:HH:mm} 提醒一次，按保存将添加提醒。' -f $candidate)
+        }
+    }
+
+    $nextQuickButtons = New-Object System.Collections.Generic.List[object]
+    $repeatQuickButtons = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt 4; $i++) {
+        $nextBtn = New-Object AppNoFocusButton
+        $nextBtn.Size = New-Object System.Drawing.Size(64, 24)
+        $nextBtn.Location = New-Object System.Drawing.Point((400 + ($i * 74)), 84)
+        $nextBtn.BackColor = $script:Colors.Surface
+        $nextBtn.ForeColor = $script:Colors.Text
+        $nextBtn.FlatStyle = 'Flat'
+        $nextBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $nextBtn.FlatAppearance.BorderSize = 1
+        $nextBtn.Visible = $false
+        $nextBtn.Add_Click($quickButtonHandler)
+        $dialog.Controls.Add($nextBtn)
+        $nextQuickButtons.Add($nextBtn)
+
+        $repeatBtn = New-Object AppNoFocusButton
+        $repeatBtn.Size = New-Object System.Drawing.Size(64, 24)
+        $repeatBtn.Location = New-Object System.Drawing.Point((400 + ($i * 74)), 114)
+        $repeatBtn.BackColor = $script:Colors.Surface
+        $repeatBtn.ForeColor = $script:Colors.Text
+        $repeatBtn.FlatStyle = 'Flat'
+        $repeatBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $repeatBtn.FlatAppearance.BorderSize = 1
+        $repeatBtn.Visible = $false
+        $repeatBtn.Add_Click($quickButtonHandler)
+        $dialog.Controls.Add($repeatBtn)
+        $repeatQuickButtons.Add($repeatBtn)
+    }
+
+    $showTemplateOptions = {
+        param([object]$Template)
+
+        $dialog.Tag.SelectedTemplate = $Template.Text
+        $nextValues = @($Template.Next | Where-Object { [int]$_ -gt 0 })
+        $repeatValues = @($Template.Repeat | Where-Object { [int]$_ -gt 0 })
+
+        $nextQuickLabel.Visible = ($nextValues.Count -gt 0)
+        for ($i = 0; $i -lt $nextQuickButtons.Count; $i++) {
+            $button = $nextQuickButtons[$i]
+            if ($i -lt $nextValues.Count) {
+                $minutes = [int]$nextValues[$i]
+                $button.Text = & $formatQuickMinutes $minutes
+                $button.Tag = [pscustomobject]@{ Minutes = $minutes; Repeat = $false }
+                $button.Visible = $true
+            }
+            else {
+                $button.Visible = $false
+            }
+        }
+
+        $repeatQuickLabel.Visible = ($repeatValues.Count -gt 0)
+        for ($i = 0; $i -lt $repeatQuickButtons.Count; $i++) {
+            $button = $repeatQuickButtons[$i]
+            if ($i -lt $repeatValues.Count) {
+                $minutes = [int]$repeatValues[$i]
+                $button.Text = & $formatQuickMinutes $minutes
+                $button.Tag = [pscustomobject]@{ Minutes = $minutes; Repeat = $true }
+                $button.Visible = $true
+            }
+            else {
+                $button.Visible = $false
+            }
+        }
+    }
+
     $enabled = New-Object System.Windows.Forms.CheckBox
     $enabled.Text = '启用'
     $enabled.Checked = $true
-    $enabled.Location = New-Object System.Drawing.Point(346, 58)
+    $enabled.Location = New-Object System.Drawing.Point(346, 148)
     $enabled.Size = New-Object System.Drawing.Size(86, 24)
     $enabled.ForeColor = $script:Colors.Text
     $dialog.Controls.Add($enabled)
@@ -4293,7 +4656,7 @@ function Show-CustomRemindersDialog {
     $sound = New-Object System.Windows.Forms.CheckBox
     $sound.Text = '播放声音'
     $sound.Checked = $false
-    $sound.Location = New-Object System.Drawing.Point(438, 58)
+    $sound.Location = New-Object System.Drawing.Point(438, 148)
     $sound.Size = New-Object System.Drawing.Size(104, 24)
     $sound.ForeColor = $script:Colors.Text
     $dialog.Controls.Add($sound)
@@ -4301,7 +4664,7 @@ function Show-CustomRemindersDialog {
     $strong = New-Object System.Windows.Forms.CheckBox
     $strong.Text = '强提醒'
     $strong.Checked = $false
-    $strong.Location = New-Object System.Drawing.Point(548, 58)
+    $strong.Location = New-Object System.Drawing.Point(548, 148)
     $strong.Size = New-Object System.Drawing.Size(94, 24)
     $strong.ForeColor = $script:Colors.Text
     $dialog.Controls.Add($strong)
@@ -4309,7 +4672,7 @@ function Show-CustomRemindersDialog {
     $dateLabel = New-Object System.Windows.Forms.Label
     $dateLabel.Text = '日期'
     $dateLabel.AutoSize = $true
-    $dateLabel.Location = New-Object System.Drawing.Point(346, 100)
+    $dateLabel.Location = New-Object System.Drawing.Point(346, 186)
     $dateLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($dateLabel)
 
@@ -4317,14 +4680,14 @@ function Show-CustomRemindersDialog {
     $dateBox.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
     $dateBox.CustomFormat = 'yyyy-MM-dd'
     $dateBox.Value = [datetime]::Today
-    $dateBox.Location = New-Object System.Drawing.Point(346, 126)
+    $dateBox.Location = New-Object System.Drawing.Point(346, 212)
     $dateBox.Size = New-Object System.Drawing.Size(140, 26)
     $dialog.Controls.Add($dateBox)
 
     $timeLabel = New-Object System.Windows.Forms.Label
     $timeLabel.Text = '时间'
     $timeLabel.AutoSize = $true
-    $timeLabel.Location = New-Object System.Drawing.Point(500, 100)
+    $timeLabel.Location = New-Object System.Drawing.Point(500, 186)
     $timeLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($timeLabel)
 
@@ -4333,33 +4696,33 @@ function Show-CustomRemindersDialog {
     $timeBox.CustomFormat = 'HH:mm'
     $timeBox.ShowUpDown = $true
     $timeBox.Value = [datetime]::Today.AddHours(9)
-    $timeBox.Location = New-Object System.Drawing.Point(500, 126)
-    $timeBox.Size = New-Object System.Drawing.Size(144, 26)
+    $timeBox.Location = New-Object System.Drawing.Point(500, 212)
+    $timeBox.Size = New-Object System.Drawing.Size(164, 26)
     $dialog.Controls.Add($timeBox)
 
     $nameLabel = New-Object System.Windows.Forms.Label
     $nameLabel.Text = '标题'
     $nameLabel.AutoSize = $true
-    $nameLabel.Location = New-Object System.Drawing.Point(346, 176)
+    $nameLabel.Location = New-Object System.Drawing.Point(346, 258)
     $nameLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($nameLabel)
 
     $nameBox = New-Object System.Windows.Forms.TextBox
-    $nameBox.Location = New-Object System.Drawing.Point(346, 202)
-    $nameBox.Size = New-Object System.Drawing.Size(298, 26)
+    $nameBox.Location = New-Object System.Drawing.Point(346, 284)
+    $nameBox.Size = New-Object System.Drawing.Size(358, 26)
     $nameBox.Text = '自定义提醒'
     $dialog.Controls.Add($nameBox)
 
     $messageLabel = New-Object System.Windows.Forms.Label
     $messageLabel.Text = '提醒内容'
     $messageLabel.AutoSize = $true
-    $messageLabel.Location = New-Object System.Drawing.Point(346, 248)
+    $messageLabel.Location = New-Object System.Drawing.Point(346, 330)
     $messageLabel.ForeColor = $script:Colors.Muted
     $dialog.Controls.Add($messageLabel)
 
     $messageBox = New-Object System.Windows.Forms.TextBox
-    $messageBox.Location = New-Object System.Drawing.Point(346, 274)
-    $messageBox.Size = New-Object System.Drawing.Size(298, 92)
+    $messageBox.Location = New-Object System.Drawing.Point(346, 356)
+    $messageBox.Size = New-Object System.Drawing.Size(358, 88)
     $messageBox.Multiline = $true
     $messageBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
     $messageBox.Text = '你设置的自定义提醒时间到了。'
@@ -4368,35 +4731,35 @@ function Show-CustomRemindersDialog {
     $error = New-Object System.Windows.Forms.Label
     $error.AutoSize = $false
     $error.Text = ''
-    $error.Location = New-Object System.Drawing.Point(24, 454)
-    $error.Size = New-Object System.Drawing.Size(620, 22)
+    $error.Location = New-Object System.Drawing.Point(24, 514)
+    $error.Size = New-Object System.Drawing.Size(700, 22)
     $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
     $dialog.Controls.Add($error)
 
-    $newBtn = New-Object System.Windows.Forms.Button
+    $newBtn = New-Object AppNoFocusButton
     $newBtn.Text = '新增'
     $newBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $newBtn.Location = New-Object System.Drawing.Point(24, 490)
+    $newBtn.Location = New-Object System.Drawing.Point(24, 550)
     $newBtn.BackColor = $script:Colors.Green
     $newBtn.ForeColor = [System.Drawing.Color]::White
     $newBtn.FlatStyle = 'Flat'
     $newBtn.FlatAppearance.BorderSize = 0
     $dialog.Controls.Add($newBtn)
 
-    $saveBtn = New-Object System.Windows.Forms.Button
+    $saveBtn = New-Object AppNoFocusButton
     $saveBtn.Text = '保存'
     $saveBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $saveBtn.Location = New-Object System.Drawing.Point(446, 490)
+    $saveBtn.Location = New-Object System.Drawing.Point(544, 550)
     $saveBtn.BackColor = $script:Colors.Blue
     $saveBtn.ForeColor = [System.Drawing.Color]::White
     $saveBtn.FlatStyle = 'Flat'
     $saveBtn.FlatAppearance.BorderSize = 0
     $dialog.Controls.Add($saveBtn)
 
-    $deleteBtn = New-Object System.Windows.Forms.Button
+    $deleteBtn = New-Object AppNoFocusButton
     $deleteBtn.Text = '删除'
     $deleteBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $deleteBtn.Location = New-Object System.Drawing.Point(124, 490)
+    $deleteBtn.Location = New-Object System.Drawing.Point(124, 550)
     $deleteBtn.BackColor = $script:Colors.OrangeSoft
     $deleteBtn.ForeColor = $script:Colors.Orange
     $deleteBtn.FlatStyle = 'Flat'
@@ -4404,10 +4767,21 @@ function Show-CustomRemindersDialog {
     $deleteBtn.FlatAppearance.BorderSize = 1
     $dialog.Controls.Add($deleteBtn)
 
-    $closeBtn = New-Object System.Windows.Forms.Button
+    $batchDeleteBtn = New-Object AppNoFocusButton
+    $batchDeleteBtn.Text = '批量删除'
+    $batchDeleteBtn.Size = New-Object System.Drawing.Size(92, 36)
+    $batchDeleteBtn.Location = New-Object System.Drawing.Point(224, 550)
+    $batchDeleteBtn.BackColor = $script:Colors.OrangeSoft
+    $batchDeleteBtn.ForeColor = $script:Colors.Orange
+    $batchDeleteBtn.FlatStyle = 'Flat'
+    $batchDeleteBtn.FlatAppearance.BorderColor = $script:Colors.Border
+    $batchDeleteBtn.FlatAppearance.BorderSize = 1
+    $dialog.Controls.Add($batchDeleteBtn)
+
+    $closeBtn = New-Object AppNoFocusButton
     $closeBtn.Text = '关闭'
     $closeBtn.Size = New-Object System.Drawing.Size(92, 36)
-    $closeBtn.Location = New-Object System.Drawing.Point(552, 490)
+    $closeBtn.Location = New-Object System.Drawing.Point(644, 550)
     $closeBtn.BackColor = $script:Colors.Surface
     $closeBtn.ForeColor = $script:Colors.Text
     $closeBtn.FlatStyle = 'Flat'
@@ -4460,7 +4834,21 @@ function Show-CustomRemindersDialog {
         $enabled.Checked = [bool]$item.Enabled
         $strong.Checked = [bool]$item.Strong
         $sound.Checked = [bool]$item.Sound
-        $error.Text = ''
+        $dialog.Tag.RepeatMinutes = Get-CustomReminderRepeatMinutes -Item $item
+        $nextQuickLabel.Visible = $false
+        $repeatQuickLabel.Visible = $false
+        foreach ($button in $nextQuickButtons) {
+            $button.Visible = $false
+        }
+        foreach ($button in $repeatQuickButtons) {
+            $button.Visible = $false
+        }
+        $error.Text = if ([int]$dialog.Tag.RepeatMinutes -gt 0) {
+            ('当前为循环提醒：每 {0} 提醒一次。' -f (& $formatQuickMinutes ([int]$dialog.Tag.RepeatMinutes)))
+        }
+        else {
+            ''
+        }
     }
 
     $list.Add_SelectedIndexChanged({ & $loadSelected })
@@ -4474,6 +4862,15 @@ function Show-CustomRemindersDialog {
         $enabled.Checked = $true
         $sound.Checked = $false
         $strong.Checked = $false
+        $dialog.Tag.RepeatMinutes = 0
+        $nextQuickLabel.Visible = $false
+        $repeatQuickLabel.Visible = $false
+        foreach ($button in $nextQuickButtons) {
+            $button.Visible = $false
+        }
+        foreach ($button in $repeatQuickButtons) {
+            $button.Visible = $false
+        }
         $error.Text = ''
         $nameBox.Focus()
         $nameBox.SelectAll()
@@ -4493,10 +4890,11 @@ function Show-CustomRemindersDialog {
         $scheduledAt = $dateBox.Value.Date.Add($timeBox.Value.TimeOfDay)
         $timeText = $scheduledAt.ToString('HH:mm')
         $atText = $scheduledAt.ToString('o')
+        $repeatMinutes = [Math]::Max(0, [int]$dialog.Tag.RepeatMinutes)
         $items = Get-CustomReminderList
         if ($list.SelectedIndex -ge 0 -and $list.SelectedIndex -lt @($items).Count) {
             $item = @($items)[$list.SelectedIndex]
-            $changed = ([string]$item.At -ne $atText) -or ([string]$item.Time -ne $timeText) -or ([string]$item.Title -ne $titleText)
+            $changed = ([string]$item.At -ne $atText) -or ([string]$item.Time -ne $timeText) -or ([string]$item.Title -ne $titleText) -or ((Get-CustomReminderRepeatMinutes -Item $item) -ne $repeatMinutes)
             $item.Enabled = [bool]$enabled.Checked
             $item.At = $atText
             $item.Time = $timeText
@@ -4504,13 +4902,14 @@ function Show-CustomRemindersDialog {
             $item.Message = $messageText
             $item.Strong = [bool]$strong.Checked
             $item.Sound = [bool]$sound.Checked
+            $item | Add-Member -MemberType NoteProperty -Name RepeatMinutes -Value $repeatMinutes -Force
             if ($changed) {
                 $item.LastFiredDate = $null
             }
             $script:Config.CustomReminders = @($items)
         }
         else {
-            $newItem = New-CustomReminder -At $atText -TimeText $timeText -Title $titleText -Message $messageText -Enabled ([bool]$enabled.Checked) -Strong ([bool]$strong.Checked) -Sound ([bool]$sound.Checked)
+            $newItem = New-CustomReminder -At $atText -TimeText $timeText -Title $titleText -Message $messageText -Enabled ([bool]$enabled.Checked) -Strong ([bool]$strong.Checked) -Sound ([bool]$sound.Checked) -RepeatMinutes $repeatMinutes
             $script:Config.CustomReminders = @($items) + $newItem
         }
 
@@ -4535,6 +4934,134 @@ function Show-CustomRemindersDialog {
         Write-AppLog -Event 'CustomReminderDeleted' -Message ('Id={0}' -f $removeId)
         $list.ClearSelected()
         & $refreshList
+    })
+
+    $batchDeleteBtn.Add_Click({
+        $items = Get-CustomReminderList
+        if (@($items).Count -eq 0) {
+            $error.Text = '没有可删除的提醒。'
+            return
+        }
+
+        $batchDialog = New-Object System.Windows.Forms.Form
+        $batchDialog.Text = '批量删除提醒'
+        Set-FormThemeIdentity -Form $batchDialog -Suffix '批量删除提醒'
+        $batchDialog.StartPosition = 'CenterParent'
+        $batchDialog.FormBorderStyle = 'FixedDialog'
+        $batchDialog.MaximizeBox = $false
+        $batchDialog.MinimizeBox = $false
+        $batchDialog.ClientSize = New-Object System.Drawing.Size(460, 420)
+        $batchDialog.BackColor = $script:Colors.Background
+        $batchDialog.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+
+        $batchTitle = New-Object System.Windows.Forms.Label
+        $batchTitle.Text = '勾选要删除的提醒'
+        $batchTitle.AutoSize = $true
+        $batchTitle.Location = New-Object System.Drawing.Point(20, 16)
+        $batchTitle.Font = New-Object System.Drawing.Font('Segoe UI', 12, [System.Drawing.FontStyle]::Bold)
+        $batchTitle.ForeColor = $script:Colors.Text
+        $batchDialog.Controls.Add($batchTitle)
+
+        $checkList = New-Object System.Windows.Forms.CheckedListBox
+        $checkList.Location = New-Object System.Drawing.Point(20, 50)
+        $checkList.Size = New-Object System.Drawing.Size(420, 300)
+        $checkList.BackColor = $script:Colors.Surface
+        $checkList.ForeColor = $script:Colors.Text
+        $checkList.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $checkList.CheckOnClick = $true
+        $batchDialog.Controls.Add($checkList)
+
+        foreach ($item in $items) {
+            [void]$checkList.Items.Add((Get-CustomReminderDisplayText -Item $item))
+        }
+
+        $selectAllBtn = New-Object AppNoFocusButton
+        $selectAllBtn.Text = '全选'
+        $selectAllBtn.Size = New-Object System.Drawing.Size(80, 32)
+        $selectAllBtn.Location = New-Object System.Drawing.Point(20, 370)
+        $selectAllBtn.BackColor = $script:Colors.Surface
+        $selectAllBtn.ForeColor = $script:Colors.Text
+        $selectAllBtn.FlatStyle = 'Flat'
+        $selectAllBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $selectAllBtn.FlatAppearance.BorderSize = 1
+        $batchDialog.Controls.Add($selectAllBtn)
+        $selectAllBtn.Add_Click({
+            for ($i = 0; $i -lt $checkList.Items.Count; $i++) {
+                $checkList.SetItemChecked($i, $true)
+            }
+        })
+
+        $deselectAllBtn = New-Object AppNoFocusButton
+        $deselectAllBtn.Text = '取消全选'
+        $deselectAllBtn.Size = New-Object System.Drawing.Size(80, 32)
+        $deselectAllBtn.Location = New-Object System.Drawing.Point(108, 370)
+        $deselectAllBtn.BackColor = $script:Colors.Surface
+        $deselectAllBtn.ForeColor = $script:Colors.Text
+        $deselectAllBtn.FlatStyle = 'Flat'
+        $deselectAllBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $deselectAllBtn.FlatAppearance.BorderSize = 1
+        $batchDialog.Controls.Add($deselectAllBtn)
+        $deselectAllBtn.Add_Click({
+            for ($i = 0; $i -lt $checkList.Items.Count; $i++) {
+                $checkList.SetItemChecked($i, $false)
+            }
+        })
+
+        $batchConfirmBtn = New-Object AppNoFocusButton
+        $batchConfirmBtn.Text = '删除所选'
+        $batchConfirmBtn.Size = New-Object System.Drawing.Size(100, 32)
+        $batchConfirmBtn.Location = New-Object System.Drawing.Point(240, 370)
+        $batchConfirmBtn.BackColor = $script:Colors.OrangeSoft
+        $batchConfirmBtn.ForeColor = $script:Colors.Orange
+        $batchConfirmBtn.FlatStyle = 'Flat'
+        $batchConfirmBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $batchConfirmBtn.FlatAppearance.BorderSize = 1
+        $batchDialog.Controls.Add($batchConfirmBtn)
+        $batchConfirmBtn.Add_Click({
+            $checkedIds = New-Object System.Collections.Generic.List[string]
+            for ($i = 0; $i -lt $checkList.Items.Count; $i++) {
+                if ($checkList.GetItemChecked($i)) {
+                    $checkedIds.Add(@($items)[$i].Id)
+                }
+            }
+
+            if ($checkedIds.Count -eq 0) {
+                return
+            }
+
+            $currentItems = Get-CustomReminderList
+            $filtered = @($currentItems | Where-Object { $checkedIds -notcontains $_.Id })
+            $script:Config.CustomReminders = $filtered
+            Save-Config
+            Update-MainStatus
+            foreach ($id in $checkedIds) {
+                Write-AppLog -Event 'CustomReminderDeleted' -Message ('批量删除：Id={0}' -f $id)
+            }
+            $list.ClearSelected()
+            & $refreshList
+            $batchDialog.Close()
+        })
+
+        $batchCancelBtn = New-Object AppNoFocusButton
+        $batchCancelBtn.Text = '取消'
+        $batchCancelBtn.Size = New-Object System.Drawing.Size(80, 32)
+        $batchCancelBtn.Location = New-Object System.Drawing.Point(360, 370)
+        $batchCancelBtn.BackColor = $script:Colors.Surface
+        $batchCancelBtn.ForeColor = $script:Colors.Text
+        $batchCancelBtn.FlatStyle = 'Flat'
+        $batchCancelBtn.FlatAppearance.BorderColor = $script:Colors.Border
+        $batchCancelBtn.FlatAppearance.BorderSize = 1
+        $batchDialog.Controls.Add($batchCancelBtn)
+        $batchCancelBtn.Add_Click({
+            $batchDialog.Close()
+        })
+
+        $batchDialog.Add_Shown({
+            param($sender, $e)
+            Enable-WindowGlass -Form $sender
+        })
+
+        [void]$batchDialog.ShowDialog($dialog)
     })
 
     $closeBtn.Add_Click({
@@ -4688,11 +5215,11 @@ function Update-MainStatus {
         return
     }
 
-    $mode = Get-ModeLabel
-    $singleMode = Get-SingleReminderScheduleMode -Value $script:Config.SingleReminder.ScheduleMode
-    $singleModeText = if ($singleMode -eq 'ClockTime') { '单次：固定时刻' } else { '单次：按当前时间顺延' }
-    $script:StatusLabel.Text = "当前模式：$mode"
-    $script:DetailLabel.Text = ('{0} | 单次：{1} | {2} | {3} | {4} | {5}' -f $singleModeText, (Get-SingleReminderText), (Get-NextCustomText), (Get-FocusDoNotDisturbText), (Get-TodayPauseText), (Get-WorkScheduleText))
+    if ($script:StatusLabel) {
+        $script:StatusLabel.Text = ('当前模式：{0}' -f (Get-ModeLabel))
+        $script:StatusLabel.Visible = $true
+    }
+    $script:DetailLabel.Text = Get-FocusDoNotDisturbText
     Update-DailyReminderRows
 
     if ($script:MainThemeControls -and $script:MainThemeControls.PSObject.Properties.Name -contains 'BtnPauseToday' -and $script:MainThemeControls.BtnPauseToday) {
@@ -4706,6 +5233,9 @@ function Update-MainStatus {
 
     if ($script:TrayPauseTodayItem) {
         $script:TrayPauseTodayItem.Text = if (Test-TodayPauseActive) { '恢复今日提醒' } else { '今日暂停提醒' }
+    }
+    if ($script:TrayNextReminderItem) {
+        $script:TrayNextReminderItem.Text = Get-NextReminderInfo
     }
 }
 
@@ -4895,7 +5425,7 @@ function Show-SingleReminderDialog {
     $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
     $dialog.Controls.Add($error)
 
-    $setBtn = New-Object System.Windows.Forms.Button
+    $setBtn = New-Object AppNoFocusButton
     $setBtn.Text = '设置'
     $setBtn.Size = New-Object System.Drawing.Size(110, 38)
     $setBtn.Location = New-Object System.Drawing.Point(248, 238)
@@ -4905,7 +5435,7 @@ function Show-SingleReminderDialog {
     $setBtn.FlatAppearance.BorderSize = 0
     $dialog.Controls.Add($setBtn)
 
-    $cancel = New-Object System.Windows.Forms.Button
+    $cancel = New-Object AppNoFocusButton
     $cancel.Text = '取消'
     $cancel.Size = New-Object System.Drawing.Size(110, 38)
     $cancel.Location = New-Object System.Drawing.Point(364, 238)
@@ -5037,6 +5567,31 @@ function Show-SettingsDialog {
     $autoHint.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
     $dialog.Controls.Add($autoHint)
 
+    $modeLabel = New-Object System.Windows.Forms.Label
+    $modeLabel.Text = '当前状态'
+    $modeLabel.AutoSize = $true
+    $modeLabel.Location = New-Object System.Drawing.Point(300, 78)
+    $modeLabel.ForeColor = $script:Colors.Text
+    $dialog.Controls.Add($modeLabel)
+
+    $modeCompany = New-Object System.Windows.Forms.RadioButton
+    $modeCompany.Text = '公司上班'
+    $modeCompany.AutoSize = $true
+    $modeCompany.Location = New-Object System.Drawing.Point(382, 76)
+    $modeCompany.BackColor = $script:Colors.Surface
+    $modeCompany.ForeColor = $script:Colors.Text
+    $modeCompany.Checked = ($script:Config.Mode -ne 'Trip')
+    $dialog.Controls.Add($modeCompany)
+
+    $modeTrip = New-Object System.Windows.Forms.RadioButton
+    $modeTrip.Text = '出差中'
+    $modeTrip.AutoSize = $true
+    $modeTrip.Location = New-Object System.Drawing.Point(472, 76)
+    $modeTrip.BackColor = $script:Colors.Surface
+    $modeTrip.ForeColor = $script:Colors.Text
+    $modeTrip.Checked = ($script:Config.Mode -eq 'Trip')
+    $dialog.Controls.Add($modeTrip)
+
     $themeLabel = New-Object System.Windows.Forms.Label
     $themeLabel.Text = '界面模式'
     $themeLabel.AutoSize = $true
@@ -5134,7 +5689,7 @@ function Show-SettingsDialog {
     $iconPreview.BackColor = $script:Colors.Surface
     $dialog.Controls.Add($iconPreview)
 
-    $browseIcon = New-Object System.Windows.Forms.Button
+    $browseIcon = New-Object AppNoFocusButton
     $browseIcon.Text = '选择'
     $browseIcon.Size = New-Object System.Drawing.Size(72, 30)
     $browseIcon.Location = New-Object System.Drawing.Point(366, 180)
@@ -5147,7 +5702,7 @@ function Show-SettingsDialog {
 
     $iconHint = New-Object System.Windows.Forms.Label
     $iconHint.AutoSize = $false
-    $iconHint.Location = New-Object System.Drawing.Point(110, 214)
+    $iconHint.Location = New-Object System.Drawing.Point(110, 230)
     $iconHint.Size = New-Object System.Drawing.Size(390, 20)
     $iconHint.ForeColor = $script:Colors.Muted
     $iconHint.Font = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Regular)
@@ -5219,7 +5774,7 @@ function Show-SettingsDialog {
     $soundEnabled = New-Object System.Windows.Forms.CheckBox
     $soundEnabled.Text = '弹窗播放声音'
     $soundEnabled.AutoSize = $true
-    $soundEnabled.Location = New-Object System.Drawing.Point(28, 244)
+    $soundEnabled.Location = New-Object System.Drawing.Point(28, 260)
     $soundEnabled.BackColor = $script:Colors.Surface
     $soundEnabled.ForeColor = $script:Colors.Text
     $soundEnabled.Checked = [bool]$script:Config.Preferences.SoundEnabled
@@ -5228,7 +5783,7 @@ function Show-SettingsDialog {
     $strongPopup = New-Object System.Windows.Forms.CheckBox
     $strongPopup.Text = '饭点强提醒'
     $strongPopup.AutoSize = $true
-    $strongPopup.Location = New-Object System.Drawing.Point(164, 244)
+    $strongPopup.Location = New-Object System.Drawing.Point(164, 260)
     $strongPopup.BackColor = $script:Colors.Surface
     $strongPopup.ForeColor = $script:Colors.Text
     $strongPopup.Checked = [bool]$script:Config.Preferences.StrongPopup
@@ -5240,20 +5795,36 @@ function Show-SettingsDialog {
     $focusDnd = New-Object System.Windows.Forms.CheckBox
     $focusDnd.Text = '专注勿扰'
     $focusDnd.AutoSize = $true
-    $focusDnd.Location = New-Object System.Drawing.Point(300, 244)
+    $focusDnd.Location = New-Object System.Drawing.Point(300, 260)
     $focusDnd.BackColor = $script:Colors.Surface
     $focusDnd.ForeColor = $script:Colors.Text
     $focusDnd.Checked = [bool]$focusSettings.Enabled
     $dialog.Controls.Add($focusDnd)
 
-    $focusHint = New-Object System.Windows.Forms.Label
-    $focusHint.AutoSize = $false
-    $focusHint.Text = ('开启后：键鼠静止 60 秒再弹，最多延迟 {0} 分钟。' -f $focusDelayMinutes)
-    $focusHint.Location = New-Object System.Drawing.Point(48, 270)
-    $focusHint.Size = New-Object System.Drawing.Size(400, 22)
-    $focusHint.ForeColor = $script:Colors.Muted
-    $focusHint.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
-    $dialog.Controls.Add($focusHint)
+    $focusHelp = New-Object System.Windows.Forms.Label
+    $focusHelp.Text = '?'
+    $focusHelp.AutoSize = $false
+    $focusHelp.Size = New-Object System.Drawing.Size(18, 18)
+    $focusHelp.Location = New-Object System.Drawing.Point(382, 262)
+    $focusHelp.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $focusHelp.BackColor = $script:Colors.BlueSoft
+    $focusHelp.ForeColor = $script:Colors.Blue
+    $focusHelp.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    $focusHelp.Cursor = [System.Windows.Forms.Cursors]::Help
+    $dialog.Controls.Add($focusHelp)
+
+    $focusTooltip = New-Object System.Windows.Forms.ToolTip
+    $focusTooltip.AutoPopDelay = 12000
+    $focusTooltip.InitialDelay = 250
+    $focusTooltip.ReshowDelay = 100
+    $focusTooltip.ShowAlways = $true
+    $focusTooltip.ToolTipTitle = '专注勿扰规则'
+    $focusTooltip.IsBalloon = $true
+    $focusRuleText = "提醒到点时，如果检测到你还在操作键鼠，就先不弹窗。`r`n键鼠静止 60 秒后再弹出提醒。`r`n最长只延迟设置的分钟数，到上限后会强制提醒。`r`n只影响弹窗时机，不会关闭或删除提醒。"
+    $focusTooltip.SetToolTip($focusHelp, $focusRuleText)
+    $focusTooltip.SetToolTip($focusDnd, $focusRuleText)
+
+    $focusTooltip.SetToolTip($focusDnd, $focusRuleText)
 
     $focusDnd.Add_CheckedChanged({
         param($sender, $e)
@@ -5269,7 +5840,6 @@ function Show-SettingsDialog {
         }
 
         $sender.FindForm().Tag.FocusDelayMinutes = [int]$selectedDelay
-        $focusHint.Text = ('开启后：键鼠静止 60 秒再弹，最多延迟 {0} 分钟。' -f [int]$selectedDelay)
     })
 
     $dailyTitle = New-Object System.Windows.Forms.Label
@@ -5345,7 +5915,7 @@ function Show-SettingsDialog {
         $unitLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
         $dialog.Controls.Add($unitLabel)
 
-        $messageBtn = New-Object System.Windows.Forms.Button
+        $messageBtn = New-Object AppNoFocusButton
         $messageBtn.Text = '消息'
         $messageBtn.Size = New-Object System.Drawing.Size(56, 28)
         $messageBtn.Location = New-Object System.Drawing.Point(388, ($Top + 1))
@@ -5392,7 +5962,7 @@ function Show-SettingsDialog {
     $error.ForeColor = [System.Drawing.Color]::FromArgb(220, 38, 38)
     $dialog.Controls.Add($error)
 
-    $saveBtn = New-Object System.Windows.Forms.Button
+    $saveBtn = New-Object AppNoFocusButton
     $saveBtn.Text = '保存'
     $saveBtn.Size = New-Object System.Drawing.Size(100, 36)
     $saveBtn.Location = New-Object System.Drawing.Point(312, 518)
@@ -5402,7 +5972,7 @@ function Show-SettingsDialog {
     $saveBtn.FlatAppearance.BorderSize = 0
     $dialog.Controls.Add($saveBtn)
 
-    $cancel = New-Object System.Windows.Forms.Button
+    $cancel = New-Object AppNoFocusButton
     $cancel.Text = '取消'
     $cancel.Size = New-Object System.Drawing.Size(100, 36)
     $cancel.Location = New-Object System.Drawing.Point(420, 518)
@@ -5425,6 +5995,7 @@ function Show-SettingsDialog {
         }
 
         $themeMode = Get-ThemeFromIndex -Index $themeBox.SelectedIndex
+        $script:Config.Mode = if ($modeTrip.Checked) { 'Trip' } else { 'Company' }
         $script:Config.Preferences.Theme = $themeMode
         $script:Config.Preferences.SoundEnabled = [bool]$soundEnabled.Checked
         $script:Config.Preferences.StrongPopup = [bool]$strongPopup.Checked
@@ -5599,7 +6170,7 @@ function Show-ReminderPopup {
     $themeRibbon.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
     $body.Controls.Add($themeRibbon)
 
-    $snooze5 = New-Object System.Windows.Forms.Button
+    $snooze5 = New-Object AppNoFocusButton
     $snooze5.Text = '5分钟后'
     $snooze5.Size = New-Object System.Drawing.Size(82, 36)
     $snooze5.Location = New-Object System.Drawing.Point(24, 154)
@@ -5610,7 +6181,7 @@ function Show-ReminderPopup {
     $snooze5.FlatAppearance.BorderSize = 1
     $body.Controls.Add($snooze5)
 
-    $snooze10 = New-Object System.Windows.Forms.Button
+    $snooze10 = New-Object AppNoFocusButton
     $snooze10.Text = '10分钟后'
     $snooze10.Size = New-Object System.Drawing.Size(82, 36)
     $snooze10.Location = New-Object System.Drawing.Point(114, 154)
@@ -5621,7 +6192,7 @@ function Show-ReminderPopup {
     $snooze10.FlatAppearance.BorderSize = 1
     $body.Controls.Add($snooze10)
 
-    $snooze30 = New-Object System.Windows.Forms.Button
+    $snooze30 = New-Object AppNoFocusButton
     $snooze30.Text = '30分钟后'
     $snooze30.Size = New-Object System.Drawing.Size(82, 36)
     $snooze30.Location = New-Object System.Drawing.Point(204, 154)
@@ -5632,7 +6203,7 @@ function Show-ReminderPopup {
     $snooze30.FlatAppearance.BorderSize = 1
     $body.Controls.Add($snooze30)
 
-    $settings = New-Object System.Windows.Forms.Button
+    $settings = New-Object AppNoFocusButton
     $settings.Text = '设置下次单次提醒时间'
     $settings.Size = New-Object System.Drawing.Size(210, 42)
     $settings.Location = New-Object System.Drawing.Point(24, 204)
@@ -5642,7 +6213,7 @@ function Show-ReminderPopup {
     $settings.FlatAppearance.BorderSize = 0
     $body.Controls.Add($settings)
 
-    $know = New-Object System.Windows.Forms.Button
+    $know = New-Object AppNoFocusButton
     $know.Text = '朕知道了'
     $know.Size = New-Object System.Drawing.Size(120, 42)
     $know.Location = New-Object System.Drawing.Point(246, 204)
@@ -5826,12 +6397,33 @@ function Check-Reminders {
             continue
         }
 
+        $repeatMinutes = Get-CustomReminderRepeatMinutes -Item $item
+        if ($repeatMinutes -gt 0 -and $dueAt -lt $now.AddMinutes(-10)) {
+            $nextAt = $dueAt
+            while ($nextAt -le $now) {
+                $nextAt = $nextAt.AddMinutes($repeatMinutes)
+            }
+            $item.At = $nextAt.ToString('o')
+            $item.Time = $nextAt.ToString('HH:mm')
+            $item.LastFiredDate = $null
+            Save-Config
+            continue
+        }
+
         if (Test-ReminderReady -Now $now -DueAt $dueAt -LastFiredDate $item.LastFiredDate) {
             Start-TrayIconBlink
             Show-WindowsToast -Title $item.Title -Message $item.Message
             if (Show-ReminderPopup -TitleText $item.Title -MessageText $item.Message -KeyName ('Custom:{0}' -f $item.Id) -Strong ([bool]$item.Strong) -Sound ([bool]$item.Sound)) {
                 Write-AppLog -Event 'CustomFired' -Message ('{0} 提醒触发，计划时间 {1}' -f $item.Title, $item.Time)
-                $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
+                if ($repeatMinutes -gt 0) {
+                    $nextAt = $now.AddMinutes($repeatMinutes)
+                    $item.At = $nextAt.ToString('o')
+                    $item.Time = $nextAt.ToString('HH:mm')
+                    $item.LastFiredDate = $null
+                }
+                else {
+                    $item.LastFiredDate = $now.ToString('yyyy-MM-dd')
+                }
                 Save-Config
                 Update-MainStatus
                 return
@@ -5964,13 +6556,6 @@ function Build-MainForm {
     $script:ClockDateLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Regular)
     $clockPanel.Controls.Add($script:ClockDateLabel)
 
-    $subtitle = New-Object System.Windows.Forms.Label
-    $subtitle.Text = '低占用常驻监测，单次提醒支持顺延或固定时刻。'
-    $subtitle.AutoSize = $true
-    $subtitle.Location = New-Object System.Drawing.Point(108, 38)
-    $subtitle.ForeColor = $script:Colors.Muted
-    $form.Controls.Add($subtitle)
-
     $themeBadge = New-Object System.Windows.Forms.Label
     $themeBadge.Text = Get-ThemeElementText -Value $script:Config.Preferences.Theme
     $themeBadge.AutoSize = $true
@@ -5988,25 +6573,27 @@ function Build-MainForm {
     $form.Controls.Add($card)
 
     $statusTitle = New-Object System.Windows.Forms.Label
-    $statusTitle.Text = '当前状态'
+    $statusTitle.Text = ''
     $statusTitle.AutoSize = $true
     $statusTitle.Location = New-Object System.Drawing.Point(20, 18)
     $statusTitle.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
     $statusTitle.ForeColor = $script:Colors.Text
+    $statusTitle.Visible = $false
     $card.Controls.Add($statusTitle)
 
     $script:StatusLabel = New-Object System.Windows.Forms.Label
     $script:StatusLabel.Text = '当前模式：公司上班'
     $script:StatusLabel.AutoSize = $true
-    $script:StatusLabel.Location = New-Object System.Drawing.Point(20, 48)
+    $script:StatusLabel.Location = New-Object System.Drawing.Point(20, 18)
     $script:StatusLabel.Font = New-Object System.Drawing.Font('Segoe UI', 12, [System.Drawing.FontStyle]::Regular)
     $script:StatusLabel.ForeColor = $script:Colors.Blue
+    $script:StatusLabel.Visible = $true
     $card.Controls.Add($script:StatusLabel)
 
     $script:DetailLabel = New-Object System.Windows.Forms.Label
     $script:DetailLabel.AutoSize = $false
     $script:DetailLabel.Text = ''
-    $script:DetailLabel.Location = New-Object System.Drawing.Point(20, 178)
+    $script:DetailLabel.Location = New-Object System.Drawing.Point(20, 188)
     $script:DetailLabel.Size = New-Object System.Drawing.Size(620, 24)
     $script:DetailLabel.ForeColor = $script:Colors.Muted
     $script:DetailLabel.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Regular)
@@ -6039,7 +6626,7 @@ function Build-MainForm {
         $stateLabel.ForeColor = $script:Colors.Muted
         $card.Controls.Add($stateLabel)
 
-        $toggleButton = New-Object System.Windows.Forms.Button
+        $toggleButton = New-Object AppNoFocusButton
         $toggleButton.Name = $Name
         $toggleButton.Text = '屏蔽'
         $toggleButton.Size = New-Object System.Drawing.Size(92, 28)
@@ -6059,45 +6646,15 @@ function Build-MainForm {
         }
     }
 
-    & $addMainDailyRow -Name 'Lunch' -Top 82
-    & $addMainDailyRow -Name 'Dinner' -Top 112
-    & $addMainDailyRow -Name 'Overtime' -Top 142
+    & $addMainDailyRow -Name 'Lunch' -Top 74
+    & $addMainDailyRow -Name 'Dinner' -Top 104
+    & $addMainDailyRow -Name 'Overtime' -Top 134
     $script:DailyReminderRows = $dailyRows
 
-    $btnCompany = New-Object System.Windows.Forms.Button
-    $btnCompany.Text = '公司上班'
-    $btnCompany.Size = New-Object System.Drawing.Size(102, 44)
-    $btnCompany.Location = New-Object System.Drawing.Point(28, 356)
-    $btnCompany.BackColor = $script:Colors.Blue
-    $btnCompany.ForeColor = [System.Drawing.Color]::White
-    $btnCompany.FlatStyle = 'Flat'
-    $btnCompany.FlatAppearance.BorderSize = 0
-    $form.Controls.Add($btnCompany)
-
-    $btnTrip = New-Object System.Windows.Forms.Button
-    $btnTrip.Text = '出差中'
-    $btnTrip.Size = New-Object System.Drawing.Size(102, 44)
-    $btnTrip.Location = New-Object System.Drawing.Point(138, 356)
-    $btnTrip.BackColor = $script:Colors.Orange
-    $btnTrip.ForeColor = [System.Drawing.Color]::White
-    $btnTrip.FlatStyle = 'Flat'
-    $btnTrip.FlatAppearance.BorderSize = 0
-    $form.Controls.Add($btnTrip)
-
-    $btnTest = New-Object System.Windows.Forms.Button
-    $btnTest.Text = '测试弹窗'
-    $btnTest.Size = New-Object System.Drawing.Size(102, 44)
-    $btnTest.Location = New-Object System.Drawing.Point(248, 356)
-    $btnTest.BackColor = $script:Colors.Green
-    $btnTest.ForeColor = [System.Drawing.Color]::White
-    $btnTest.FlatStyle = 'Flat'
-    $btnTest.FlatAppearance.BorderSize = 0
-    $form.Controls.Add($btnTest)
-
-    $btnCustom = New-Object System.Windows.Forms.Button
-    $btnCustom.Text = '更多'
-    $btnCustom.Size = New-Object System.Drawing.Size(102, 44)
-    $btnCustom.Location = New-Object System.Drawing.Point(358, 356)
+    $btnCustom = New-Object AppNoFocusButton
+    $btnCustom.Text = '设置'
+    $btnCustom.Size = New-Object System.Drawing.Size(86, 34)
+    $btnCustom.Location = New-Object System.Drawing.Point(602, 356)
     $btnCustom.BackColor = $script:Colors.BlueSoft
     $btnCustom.ForeColor = $script:Colors.Blue
     $btnCustom.FlatStyle = 'Flat'
@@ -6105,7 +6662,7 @@ function Build-MainForm {
     $btnCustom.FlatAppearance.BorderSize = 1
     $form.Controls.Add($btnCustom)
 
-    $btnSettings = New-Object System.Windows.Forms.Button
+    $btnSettings = New-Object AppNoFocusButton
     $btnSettings.Text = '设置'
     $btnSettings.Size = New-Object System.Drawing.Size(102, 44)
     $btnSettings.Location = New-Object System.Drawing.Point(468, 356)
@@ -6116,7 +6673,7 @@ function Build-MainForm {
     $btnSettings.Visible = $false
     $form.Controls.Add($btnSettings)
 
-    $btnExit = New-Object System.Windows.Forms.Button
+    $btnExit = New-Object AppNoFocusButton
     $btnExit.Text = '退出'
     $btnExit.Size = New-Object System.Drawing.Size(80, 44)
     $btnExit.Location = New-Object System.Drawing.Point(608, 356)
@@ -6128,7 +6685,7 @@ function Build-MainForm {
     $btnExit.Visible = $false
     $form.Controls.Add($btnExit)
 
-    $btnPauseToday = New-Object System.Windows.Forms.Button
+    $btnPauseToday = New-Object AppNoFocusButton
     $btnPauseToday.Text = '今日暂停'
     $btnPauseToday.Size = New-Object System.Drawing.Size(102, 34)
     $btnPauseToday.Location = New-Object System.Drawing.Point(468, 414)
@@ -6141,7 +6698,7 @@ function Build-MainForm {
     $form.Controls.Add($btnPauseToday)
 
     $tip = New-Object System.Windows.Forms.Label
-    $tip.Text = '关闭窗口会缩到系统托盘。'
+    $tip.Text = '关闭窗口只会缩到系统托盘，设置里面的退出按钮才会完全退出程序哦。'
     $tip.AutoSize = $true
     $tip.Location = New-Object System.Drawing.Point(28, 422)
     $tip.ForeColor = $script:Colors.Muted
@@ -6153,15 +6710,11 @@ function Build-MainForm {
         ThemeBanner = $themeBanner
         ThemeIcon = $themeIcon
         Title = $title
-        Subtitle = $subtitle
         ThemeBadge = $themeBadge
         ClockPanel = $clockPanel
         ClockCaption = $clockCaption
         Card = $card
         StatusTitle = $statusTitle
-        BtnCompany = $btnCompany
-        BtnTrip = $btnTrip
-        BtnTest = $btnTest
         BtnCustom = $btnCustom
         BtnSettings = $btnSettings
         BtnExit = $btnExit
@@ -6170,18 +6723,13 @@ function Build-MainForm {
     }
     Apply-MainTheme
 
-    $btnCompany.Add_Click({ Set-Mode -Mode 'Company' })
-    $btnTrip.Add_Click({ Set-Mode -Mode 'Trip' })
-    $btnTest.Add_Click({
-        [void](Show-ReminderPopup -TitleText '测试弹窗' -MessageText '这是一个测试弹窗，用来确认界面和按钮效果。' -KeyName 'Test' -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled))
-    })
-
     $moreMenu = New-Object System.Windows.Forms.ContextMenuStrip
     $miMoreStats = $moreMenu.Items.Add('本周统计')
     $miMoreCustom = $moreMenu.Items.Add('自定义提醒')
+    $miMoreTest = $moreMenu.Items.Add('测试弹窗')
     $miMorePauseToday = $moreMenu.Items.Add('今日暂停提醒')
     $miMoreWorkSchedule = $moreMenu.Items.Add('工作制')
-    $miMoreSettings = $moreMenu.Items.Add('设置')
+    $miMoreSettings = $moreMenu.Items.Add('更多设置')
     [void]$moreMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $miMoreExit = $moreMenu.Items.Add('退出')
     $moreMenu.Tag = [pscustomobject]@{
@@ -6210,6 +6758,9 @@ function Build-MainForm {
         param($sender, $e)
         $ownerForm = if ($sender.Owner -and $sender.Owner.SourceControl) { $sender.Owner.SourceControl.FindForm() } else { $script:MainForm }
         Show-CustomRemindersDialog -OwnerForm $ownerForm
+    })
+    $miMoreTest.Add_Click({
+        [void](Show-ReminderPopup -TitleText '测试弹窗' -MessageText '这是一个测试弹窗，用来确认界面和按钮效果。' -KeyName 'Test' -Strong ([bool]$script:Config.Preferences.StrongPopup) -Sound ([bool]$script:Config.Preferences.SoundEnabled))
     })
     $miMorePauseToday.Add_Click({
         Toggle-TodayPause
@@ -6252,9 +6803,11 @@ function Build-MainForm {
             $script:TrayIcon.Text = Get-ThemeWindowTitle -Theme $script:Config.Preferences.Theme
             $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 
+            $miNextReminder = $trayMenu.Items.Add((Get-NextReminderInfo))
+            $miNextReminder.Name = 'NextReminder'
+            $miNextReminder.Enabled = $false
+            [void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
             $miShow = $trayMenu.Items.Add('显示主界面')
-            $miCompany = $trayMenu.Items.Add('公司上班')
-            $miTrip = $trayMenu.Items.Add('出差中')
             $miPauseToday = $trayMenu.Items.Add('今日暂停提醒')
             $miStats = $trayMenu.Items.Add('本周统计')
             $miCustom = $trayMenu.Items.Add('自定义提醒')
@@ -6271,8 +6824,6 @@ function Build-MainForm {
                 $script:MainForm.Show()
                 $script:MainForm.Activate()
             })
-            $miCompany.Add_Click({ Set-Mode -Mode 'Company' })
-            $miTrip.Add_Click({ Set-Mode -Mode 'Trip' })
             $miPauseToday.Add_Click({ Toggle-TodayPause })
             $miStats.Add_Click({
                 Show-MainWindow
@@ -6293,14 +6844,24 @@ function Build-MainForm {
             $miExit.Add_Click({
                 $script:ShouldExit = $true
                 $script:TrayIcon.Visible = $false
-                $script:TrayIcon.Dispose()
-                $script:TrayIcon = $null
-                $script:TrayPauseTodayItem = $null
-                $script:MainForm.Close()
-            })
+            $script:TrayIcon.Dispose()
+            $script:TrayIcon = $null
+            $script:TrayPauseTodayItem = $null
+            $script:TrayNextReminderItem = $null
+            $script:MainForm.Close()
+        })
 
             $script:TrayIcon.ContextMenuStrip = $trayMenu
             $script:TrayPauseTodayItem = $miPauseToday
+            $script:TrayNextReminderItem = $miNextReminder
+            $trayMenu.Add_Opening({
+                if ($script:TrayNextReminderItem) {
+                    $script:TrayNextReminderItem.Text = Get-NextReminderInfo
+                }
+                if ($script:TrayPauseTodayItem) {
+                    $script:TrayPauseTodayItem.Text = if (Test-TodayPauseActive) { '恢复今日提醒' } else { '今日暂停提醒' }
+                }
+            })
             $script:TrayIcon.Visible = $true
             $script:TrayIcon.Add_MouseClick({
                 param($sender, $e)
@@ -6362,6 +6923,7 @@ function Build-MainForm {
             $script:TrayIcon.Dispose()
             $script:TrayIcon = $null
             $script:TrayPauseTodayItem = $null
+            $script:TrayNextReminderItem = $null
         }
     })
 
@@ -6385,10 +6947,6 @@ if ($single.Enabled -and -not $single.Triggered -and -not [string]::IsNullOrWhit
     if ($null -ne $when) {
         if ($single.At -is [string] -and $single.At.Length -eq 5 -and $single.At[2] -eq ':') {
             $script:Config.SingleReminder.At = $when.ToString('o')
-        }
-
-        if ($now -ge $when -and $now -le $when.AddMinutes(5)) {
-            $script:Config.SingleReminder.Triggered = $true
         }
     }
 }
